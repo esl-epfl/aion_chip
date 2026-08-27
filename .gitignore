@@ -1,0 +1,21 @@
+# environment
+env.sh
+
+# pycache & venv
+__pycache__/
+
+# build directory
+.build/
+logs/
+
+# nvim/vscode stuff
+.nvim/
+.vscode/
+
+# compiled object files
+*.slo
+*.lo
+*.o
+*.obj
+*.vcd
+*.fst
