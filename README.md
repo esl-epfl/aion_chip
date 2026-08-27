@@ -7,7 +7,7 @@
 
 ---
 
-**AION** (_All-digital Integrated Oscillator Network_, module name: `tt_um_aion`) is a self-contained AI optimized testchip designed for the **Tiny Tapeout** platform on the **IHP SG13G2 130 nm SiGe BiCMOS** process.
+**AION** (_AI-Optimized Netlist-to-Layout_, module name: `tt_um_aion`) is a self-contained AI optimized testchip designed for the **Tiny Tapeout** platform on the **IHP SG13G2 130 nm SiGe BiCMOS** process.
 
 ---
 
