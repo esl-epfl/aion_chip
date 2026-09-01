@@ -1,0 +1,33 @@
+# General Formatting Constraints
+--column_limit=150
+--indentation_spaces=2
+--wrap_spaces=4
+
+# Explicit Net & Variable Declaration Alignment
+# (This is the flag that aligns the 'logic' types, ranges, and variable names into vertical columns)
+--module_net_variable_alignment=align
+--struct_union_members_alignment=align
+--class_member_variable_alignment=align
+
+# Port and Parameter Alignment
+--port_declarations_alignment=align
+--formal_parameters_alignment=align
+--named_port_alignment=align
+--named_parameter_alignment=align
+
+# Dimension & Subscript Formatting
+--port_declarations_right_align_packed_dimensions=true
+
+# Statement & Assignment Alignment
+--assignment_statement_alignment=align
+--case_items_alignment=align
+--enum_assignment_statement_alignment=align
+
+# Group Boundaries
+# Options: 'none', 'blank-lines', or 'separator-comments'
+# Set to 'blank-lines' so empty lines separate distinct alignment blocks 
+--alignment_group_boundary=blank-lines
+
+# Prevent Reflowing Math and Long Ranges
+--try_wrap_long_lines=false
+

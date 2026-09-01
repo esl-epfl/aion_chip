@@ -1,0 +1,103 @@
+CAPI=2:
+
+# ================================================================
+#  Project:     AION
+#  Author:      Filippo Quadri <filippo.quadri@epfl.ch>
+#  Created:     2026-09-01
+#  Description: AION SoC - FuseSoC Core File
+# ================================================================
+
+name: epfl:aion:aion:1.0.0
+description: AION SoC
+
+filesets:
+  rtl:
+    files:
+      - src/rtl/spm.v
+      - src/rtl/pm32.v
+    file_type: verilogSource
+
+  dump_waves:
+    files:
+      - src/misc/dump_waves.v
+    file_type: verilogSource
+
+  simulation-top:
+    files:
+      - src/rtl/top.sv
+    file_type: systemVerilogSource
+
+  tb_py:
+    files:
+      - src/tb/aion_test.py
+    file_type: user
+
+  verilator-waivers:
+    files:
+      - src/misc/aion.vlt
+    file_type: vlt
+
+targets:
+  default: &default
+    filesets:
+      - rtl
+      - tool_verilator ? (verilator-waivers)
+    toplevel: top
+
+  rtl_sim:
+    <<: *default
+    description: Perform RTL simulation of the AION SoC
+    default_tool: icarus
+    filesets_append:
+      - dump_waves
+      - simulation-top
+      - tb_py
+    tools:
+      icarus:
+        iverilog_options:
+          - -g2012
+          - '-s dump_waves'
+        vvp_options:
+          - -M $(shell cocotb-config --lib-dir)
+          - -m $(shell cocotb-config --lib-name vpi icarus)
+
+  rtl_sim_verilator:
+    <<: *default
+    description: Perform RTL simulation of the AION SoC with Verilator
+    default_tool: verilator
+    toplevel: top
+    filesets_append:
+      - simulation-top
+      - tb_py
+    tools:
+      verilator:
+        mode: cc
+        verilator_options:
+          - '--sv'
+          - '--cc'
+          - '--trace'
+          - '--trace-fst'
+          - '--trace-structs'
+          - '--trace-params'
+          - '--trace-max-array 1024'
+          - '--x-assign unique'
+          - '--x-initial unique'
+          - '--timing'
+          - '--vpi'
+          - '--prefix Vtop'
+          - '-o Vtop'
+          - '--public-flat-rw'
+          - '-CFLAGS "-Wall -fpermissive"'
+          - '-LDFLAGS "-pthread -lutil"'
+          - '-LDFLAGS "-Wl,-rpath,$(shell cocotb-config --lib-dir) -L$(shell cocotb-config --lib-dir) -lcocotbvpi_verilator" $(shell cocotb-config --share)/lib/verilator/verilator.cpp'
+          - "-Wall"
+        make_options:
+          - '-j$(shell N=$$(nproc 2>/dev/null || echo 4); [ "$$N" -le 8 ] && echo "$$N" || echo 8)'
+        run_options:
+          - '--trace'
+          - '--trace-file'
+          - '../../aion.fst'
+
+  librelane:
+    <<: *default
+    description: Collect RTL sources for LibreLane physical implementation
