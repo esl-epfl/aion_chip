@@ -1,0 +1,8 @@
+[libraries]
+# Defines the standard work library
+aion_soc.files = [
+  "src/rtl/add.vhd",
+  "src/rtl/mult.vhd",
+  "src/rtl/posit_alu.vhd",
+  "src/rtl/aion_soc.vhd",
+]

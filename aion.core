@@ -13,19 +13,16 @@ description: AION SoC
 filesets:
   rtl:
     files:
-      - src/rtl/spm.v
-      - src/rtl/pm32.v
-    file_type: verilogSource
+      - src/rtl/add.vhd
+      - src/rtl/mult.vhd
+      - src/rtl/posit_alu.vhd
+      - src/rtl/aion_soc.vhd
+    file_type: vhdlSource
 
   dump_waves:
     files:
       - src/misc/dump_waves.v
     file_type: verilogSource
-
-  simulation-top:
-    files:
-      - src/rtl/top.sv
-    file_type: systemVerilogSource
 
   tb_py:
     files:
@@ -42,7 +39,7 @@ targets:
     filesets:
       - rtl
       - tool_verilator ? (verilator-waivers)
-    toplevel: top
+    toplevel: aion_soc
 
   rtl_sim:
     <<: *default
@@ -60,6 +57,21 @@ targets:
         vvp_options:
           - -M $(shell cocotb-config --lib-dir)
           - -m $(shell cocotb-config --lib-name vpi icarus)
+  
+  rtl_sim_ghdl:
+    <<: *default
+    description: Perform RTL simulation of the AION SoC
+    default_tool: ghdl
+    filesets_append:
+      - tb_py
+    tools:
+      ghdl:
+        analyze_options:
+          - -fsynopsys
+          - -fexplicit
+        run_options:
+          - --ieee-asserts=disable
+          - --vpi=$(shell cocotb-config --lib-dir)/libcocotbvpi_ghdl.so
 
   rtl_sim_verilator:
     <<: *default

@@ -12,11 +12,11 @@ include scripts/utils.mk
 # ------------------------------------------------------------------------------
 CORE         ?= aion
 CORE_NAME     = epfl:aion:$(CORE):1.0.0
-TARGET       ?= rtl_sim
-TOOL         ?= icarus
+TARGET       ?= rtl_sim_ghdl
+TOOL         ?= ghdl
 BUILD_DIR    ?= .build
 
-TOPLEVEL     ?= top
+TOPLEVEL     ?= aion_soc
 SIM_MODULE   ?= $(CORE)_test
 TEST_DIRS    ?= src/tb/
 
@@ -29,6 +29,7 @@ WAVEFORM_VIEWER ?= surfer
 FUSESOC         := $(shell which fusesoc)
 PYTHON          := $(shell which python)
 VERIBLE_FORMAT  := $(shell which verible-verilog-format)
+VSG             := $(shell which vsg)
 
 # ------------------------------------------------------------------------------
 # Dynamic Environment & Conda Path Fixes
@@ -45,7 +46,7 @@ endif
 
 all: sim
 
-sim: TARGET := rtl_sim
+sim: TARGET := rtl_sim_ghdl
 sim: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=aion TOOL=icarus) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
 	COCOTB_DUT_WRAPPED=0 \
 	$(FUSESOC) run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
@@ -66,13 +67,13 @@ setup:  ## Generate build files without running simulation/synthesis/... (e.g., 
 	$(FUSESOC) run --setup --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
 
 format: ## Format the codebase
-	@FILES=$$(find src -name '*.sv*' 2>/dev/null); \
+	@FILES=$$(find src -name '*.vhd*' 2>/dev/null); \
 	if [ -n "$$FILES" ]; then \
 		echo "Formatting files:"; \
 		for f in $$FILES; do echo "  -> $$f"; done; \
-		echo "$$FILES" | xargs $(VERIBLE_FORMAT) --flagfile=.verible-verilog-format --inplace; \
+		$(VSG) -f $$FILES --fix; \
 	else \
-		echo "No SystemVerilog files found."; \
+		echo "No VHDL files found."; \
 	fi
 
 clean:  ## Clean up custom generated build directory
