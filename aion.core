@@ -17,6 +17,8 @@ filesets:
       - src/rtl/mult.vhd
       - src/rtl/posit_alu.vhd
       - src/rtl/aion_soc.vhd
+      - src/rtl/aion_interface.vhd
+      - src/rtl/tt_um_aion.vhd
     file_type: vhdlSource
 
   dump_waves:
@@ -39,7 +41,7 @@ targets:
     filesets:
       - rtl
       - tool_verilator ? (verilator-waivers)
-    toplevel: aion_soc
+    toplevel: tt_um_aion
 
   rtl_sim:
     <<: *default
@@ -72,14 +74,15 @@ targets:
         run_options:
           - --ieee-asserts=disable
           - --vpi=$(shell cocotb-config --lib-dir)/libcocotbvpi_ghdl.so
+          - --wave=../../aion.ghw
+          - --fst=../../aion.fst
 
   rtl_sim_verilator:
     <<: *default
     description: Perform RTL simulation of the AION SoC with Verilator
     default_tool: verilator
-    toplevel: top
+    toplevel: tt_um_aion
     filesets_append:
-      - simulation-top
       - tb_py
     tools:
       verilator:

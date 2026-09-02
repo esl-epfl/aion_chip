@@ -2,12 +2,13 @@
   "meta": {
     "flow": "VHDLClassic"
   },
-  "DESIGN_NAME": "aion_soc",
+  "DESIGN_NAME": "tt_um_aion",
   "VHDL_FILES": [
     "dir::../src/rtl/add.vhd",
     "dir::../src/rtl/mult.vhd",
     "dir::../src/rtl/posit_alu.vhd",
-    "dir::../src/rtl/aion_soc.vhd"
+    "dir::../src/rtl/aion_soc.vhd",
+    "dir::../src/rtl/aion_soc_mapped.vhd"
   ],
   "CLOCK_PERIOD": 20,
   "CLOCK_PORT": "clk",

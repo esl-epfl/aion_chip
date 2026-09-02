@@ -16,7 +16,7 @@ TARGET       ?= rtl_sim_ghdl
 TOOL         ?= ghdl
 BUILD_DIR    ?= .build
 
-TOPLEVEL     ?= aion_soc
+TOPLEVEL     ?= tt_um_aion
 SIM_MODULE   ?= $(CORE)_test
 TEST_DIRS    ?= src/tb/
 
@@ -81,7 +81,7 @@ clean:  ## Clean up custom generated build directory
 
 waves:
 	@if [ "$(WAVEFORM_VIEWER)" = "gtkwave" ]; then \
-		$(WAVEFORM_VIEWER) $(BUILD_DIR)/$(CORE).fst src/misc/$(CORE).gtkw; \
+		$(WAVEFORM_VIEWER) $(BUILD_DIR)/$(CORE).ghw src/misc/$(CORE).gtkw; \
 	elif [ "$(WAVEFORM_VIEWER)" = "surfer" ]; then \
 		$(WAVEFORM_VIEWER) -s src/misc/$(CORE).surf.ron $(BUILD_DIR)/$(CORE).fst; \
 	else \

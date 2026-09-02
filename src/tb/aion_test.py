@@ -2,7 +2,7 @@
 #  SPDX-FileCopyrightText:    2026 Filippo Quadri
 #  SPDX-License-Identifier:   Apache-2.0 WITH SHL-2.1
 #  Created:                   2026-09-01
-#  Description:               AION SoC - Top Level Cocotb TB
+#  Description:               AION SoC - TinyTapeout Register Interface Cocotb TB
 # ================================================================
 
 import logging
@@ -34,38 +34,60 @@ OPERATIONS = [
     },
 ]
 
+REG_OP_A_LO = 0
+REG_OP_A_HI = 1
+REG_OP_B_LO = 2
+REG_OP_B_HI = 3
+REG_CONTROL = 4
+REG_RESULT_LO = 5
+REG_RESULT_HI = 6
+REG_STATUS = 7
+
 
 async def reset(dut):
     dut.rst_n.value = 0
-    dut.opA.value = 0
-    dut.opB.value = 0
-    dut.opcode.value = 0
-    dut.start.value = 0
+    dut.ui_in.value = 0
+    dut.uio_in.value = 0
 
     await ClockCycles(dut.clk, 5)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 5)
 
 
+async def write_reg(dut, addr, data):
+    dut.ui_in.value = 0x80 | (addr & 0x07)
+    dut.uio_in.value = data & 0xFF
+    await RisingEdge(dut.clk)
+    dut.ui_in.value = addr & 0x07
+    dut.uio_in.value = 0
+
+
+async def read_reg(dut, addr):
+    dut.ui_in.value = addr & 0x07
+    await RisingEdge(dut.clk)
+    return int(dut.uo_out.value)
+
+
 async def compute_posit(dut, opA, opB, opcode):
-    await RisingEdge(dut.clk)
-    dut.opA.value = opA
-    dut.opB.value = opB
-    dut.opcode.value = opcode
-    dut.start.value = 1
+    await write_reg(dut, REG_OP_A_LO, opA)
+    await write_reg(dut, REG_OP_A_HI, opA >> 8)
+    await write_reg(dut, REG_OP_B_LO, opB)
+    await write_reg(dut, REG_OP_B_HI, opB >> 8)
+    await write_reg(dut, REG_CONTROL, (opcode & 1) | 0x02)
 
-    await RisingEdge(dut.done)
-    result = int(dut.result.value)
+    while True:
+        status = await read_reg(dut, REG_STATUS)
+        if status & 0x01:
+            break
 
-    await RisingEdge(dut.clk)
-    dut.start.value = 0
-
-    return result
+    result_lo = await read_reg(dut, REG_RESULT_LO)
+    result_hi = await read_reg(dut, REG_RESULT_HI)
+    return (result_hi << 8) | result_lo
 
 
 @cocotb.test()
 async def test_posit_add(dut):
-    """Test Posit16 addition"""
+    """Test Posit16 addition via the TinyTapeout register interface"""
 
     clock = Clock(dut.clk, 20, unit="ns")
     cocotb.start_soon(clock.start())
@@ -91,7 +113,7 @@ async def test_posit_add(dut):
 
 @cocotb.test()
 async def test_posit_mult(dut):
-    """Test Posit16 multiplication"""
+    """Test Posit16 multiplication via the TinyTapeout register interface"""
 
     clock = Clock(dut.clk, 20, unit="ns")
     cocotb.start_soon(clock.start())
