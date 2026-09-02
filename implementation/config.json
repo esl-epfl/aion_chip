@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "flow": "VHDLClassic"
+  },
+  "DESIGN_NAME": "aion_soc",
+  "VHDL_FILES": [
+    "dir::../src/rtl/add.vhd",
+    "dir::../src/rtl/mult.vhd",
+    "dir::../src/rtl/posit_alu.vhd",
+    "dir::../src/rtl/aion_soc.vhd"
+  ],
+  "CLOCK_PERIOD": 20,
+  "CLOCK_PORT": "clk",
+  "SYNTH_HIERARCHY_MODE": "keep",
+  "GHDL_ARGUMENTS": "--std=08 -fsynopsys -fexplicit",
+  "FP_SIZING": "absolute",
+  "DIE_AREA": [0, 0, 660, 210],
+  "CORE_AREA": [10, 10, 650, 200]
+}

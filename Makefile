@@ -89,6 +89,69 @@ waves:
 	fi
 
 # ------------------------------------------------------------------------------
+# Physical Implementation Flow (LibreLane via Docker)
+# ------------------------------------------------------------------------------
+PDK                  ?= ihp-sg13g2
+PDK_ROOT             ?= /foss/pdks
+LIBRELANE_RUN_DIR    := $(BUILD_DIR)/librelane_$(CORE)
+FLOW_FINAL_DIR        = $(LIBRELANE_RUN_DIR)/final
+LIBRELANE_CONFIG_SRC  = $(PROJECT_ROOT)/implementation/config.json
+LIBRELANE_CONFIG      = $(LIBRELANE_RUN_DIR)/config.json
+LIBRELANE_PIN_ORDER   = $(PROJECT_ROOT)/implementation/pin_order.cfg
+
+# Internal helpers for joining lists
+comma := ,
+space := $(subst ,, )
+
+define librelane_prepare
+	@mkdir -p $(1)/rtl $(2)
+	@$(eval _RTL_FILES := $(shell $(PYTHON) $(PROJECT_ROOT)/scripts/extract_fusesoc_sources.py \
+		--core $(CORE_NAME) \
+		--target librelane \
+		--config $(PROJECT_ROOT)/fusesoc.conf \
+		--build-root $(BUILD_DIR) \
+		--format list))
+	@for src in $(_RTL_FILES); do \
+		dst="$(1)/rtl/$$(basename $$src)"; \
+		if [ ! -e "$$dst" ] || [ "$$src" -nt "$$dst" ]; then \
+			cp -v "$$src" "$$dst"; \
+		fi; \
+	done
+	@$(PYTHON) $(PROJECT_ROOT)/scripts/prepare_librelane_config.py \
+		--src-config $(LIBRELANE_CONFIG_SRC) \
+		--dst-config $(3) \
+		--ip-dir $(1) \
+		--vhdl-files "$(subst $(space),$(comma),$(addprefix $(1)/rtl/,$(notdir $(_RTL_FILES))))" \
+		$(4)
+endef
+
+librelane: ## Run LibreLane physical implementation flow inside $(BUILD_DIR)
+	$(call librelane_prepare,$(LIBRELANE_RUN_DIR),$(FLOW_FINAL_DIR),$(LIBRELANE_CONFIG),)
+	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
+		--pdk $(PDK) \
+		--pdk-root $(PDK_ROOT) \
+		--manual-pdk \
+		--save-views-to ./final/
+
+librelane-openroad: ## Open the last LibreLane run in OpenROAD GUI
+	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
+		--pdk $(PDK) \
+		--pdk-root $(PDK_ROOT) \
+		--manual-pdk \
+		--last-run \
+		--flow OpenInOpenROAD
+.PHONY: librelane-openroad
+
+librelane-klayout: ## Open the last LibreLane run in KLayout
+	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
+		--pdk $(PDK) \
+		--pdk-root $(PDK_ROOT) \
+		--manual-pdk \
+		--last-run \
+		--flow OpenInKLayout
+.PHONY: librelane-klayout
+
+# ------------------------------------------------------------------------------
 # Cocotb Variable Export Routine
 # ------------------------------------------------------------------------------
 _setup_cocotb_env:
