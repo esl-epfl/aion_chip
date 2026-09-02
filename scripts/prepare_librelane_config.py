@@ -12,6 +12,28 @@ import os
 import sys
 
 
+# Flow that stops after synthesis for Verilog designs.
+SYNTH_ONLY_FLOW = [
+    "Verilator.Lint",
+    "Checker.LintTimingConstructs",
+    "Checker.LintErrors",
+    "Checker.LintWarnings",
+    "Yosys.JsonHeader",
+    "Yosys.Synthesis",
+    "Checker.YosysUnmappedCells",
+    "Checker.YosysSynthChecks",
+    "Checker.NetlistAssignStatements",
+]
+
+# Flow that stops after synthesis for VHDL designs.
+VHDL_SYNTH_ONLY_FLOW = [
+    "Yosys.VHDLSynthesis",
+    "Checker.YosysUnmappedCells",
+    "Checker.YosysSynthChecks",
+    "Checker.NetlistAssignStatements",
+]
+
+
 def make_relative(path: str, base: str) -> str:
     """Return a path relative to base, using LibreLane's dir:: prefix."""
     abs_path = os.path.abspath(path)
@@ -86,7 +108,7 @@ def main():
         config.pop("PIN_ORDER_CONFIG", None)
 
     if args.synth_only:
-        config["SYNTH_ONLY"] = True
+        config["meta"]["flow"] = VHDL_SYNTH_ONLY_FLOW
 
     os.makedirs(os.path.dirname(args.dst_config), exist_ok=True)
     with open(args.dst_config, "w") as f:

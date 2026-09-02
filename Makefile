@@ -42,7 +42,7 @@ endif
 # ------------------------------------------------------------------------------
 # Targets
 # ------------------------------------------------------------------------------
-.PHONY: all sim sim_verilator sim_all setup format clean waves _setup_cocotb_env
+.PHONY: all sim sim_verilator sim_all setup format clean waves librelane-openroad librelane-klayout synth _save_synth _setup_cocotb_env
 
 all: sim
 
@@ -133,6 +133,20 @@ librelane: ## Run LibreLane physical implementation flow inside $(BUILD_DIR)
 		--manual-pdk \
 		--save-views-to ./final/
 
+# Latest LibreLane synthesis run directory (timestamped).
+SYNTH_RUN_DIR        := $(BUILD_DIR)/synth_$(CORE)
+SYNTH_CONFIG          = $(SYNTH_RUN_DIR)/config.json
+SYNTH_LATEST_RUN     := $(lastword $(sort $(wildcard $(SYNTH_RUN_DIR)/runs/RUN_*)))
+
+synth: ## Run LibreLane synthesis only inside $(BUILD_DIR)/synth_$(CORE)
+	$(call librelane_prepare,$(SYNTH_RUN_DIR),$(SYNTH_RUN_DIR)/final,$(SYNTH_CONFIG),--synth-only)
+	@cd $(SYNTH_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
+		--pdk $(PDK) \
+		--pdk-root $(PDK_ROOT) \
+		--manual-pdk \
+		--save-views-to ./final/
+	@$(MAKE) _save_synth
+
 librelane-openroad: ## Open the last LibreLane run in OpenROAD GUI
 	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
 		--pdk $(PDK) \
@@ -149,7 +163,28 @@ librelane-klayout: ## Open the last LibreLane run in KLayout
 		--manual-pdk \
 		--last-run \
 		--flow OpenInKLayout
-.PHONY: librelane-klayout
+
+# ------------------------------------------------------------------------------
+# Utils targets
+# ------------------------------------------------------------------------------
+_save_synth:
+	@if [ -z "$(SYNTH_LATEST_RUN)" ]; then \
+		echo "Error: no synthesis run found in $(SYNTH_RUN_DIR)/runs/"; \
+		exit 1; \
+	fi
+	@mkdir -p $(PROJECT_ROOT)/implementation/synth/reports
+	@mkdir -p $(PROJECT_ROOT)/implementation/synth/logs
+	@echo "Copying synthesis artifacts from $(SYNTH_LATEST_RUN) to $(PROJECT_ROOT)/implementation/synth/"
+	@cp -v $(SYNTH_LATEST_RUN)/final/nl/$(TOPLEVEL).nl.v $(PROJECT_ROOT)/implementation/synth/
+	@cp -v $(SYNTH_LATEST_RUN)/final/metrics.csv $(PROJECT_ROOT)/implementation/synth/logs/
+	@cp -v $(SYNTH_LATEST_RUN)/final/metrics.json $(PROJECT_ROOT)/implementation/synth/logs/
+	@cp -v $(SYNTH_LATEST_RUN)/flow.log $(PROJECT_ROOT)/implementation/synth/logs/
+	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/stat.rpt $(PROJECT_ROOT)/implementation/synth/reports/
+	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/latch.rpt $(PROJECT_ROOT)/implementation/synth/reports/
+	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/chk.rpt $(PROJECT_ROOT)/implementation/synth/reports/
+	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/pre_synth_chk.rpt $(PROJECT_ROOT)/implementation/synth/reports/
+	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/post_dff.rpt $(PROJECT_ROOT)/implementation/synth/reports/
+	@echo "Synthesis artifacts saved to $(PROJECT_ROOT)/implementation/synth/"
 
 # ------------------------------------------------------------------------------
 # Cocotb Variable Export Routine
