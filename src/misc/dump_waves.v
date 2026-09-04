@@ -8,6 +8,6 @@
 module dump_waves;
   initial begin
     $dumpfile("../../aion.fst");
-    $dumpvars(0, top);
+    $dumpvars(0, tt_um_aion);
   end
 endmodule

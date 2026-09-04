@@ -33,6 +33,13 @@ filesets:
       - src/tb/aion_test.py
     file_type: user
 
+  post_synth_netlist:
+    depend:
+      - epfl:aion:tech:1.0.0
+    files:
+      - implementation/synth/nl/tt_um_aion.nl.v
+    file_type: verilogSource
+
   verilator-waivers:
     files:
       - src/misc/aion.vlt
@@ -118,3 +125,20 @@ targets:
   librelane:
     <<: *default
     description: Collect RTL sources for LibreLane physical implementation
+
+  post_synth_sim:
+    description: Perform RTL simulation of the AION SoC
+    default_tool: verilator
+    toplevel: tt_um_aion
+    filesets_append:
+      - post_synth_netlist
+      - tool_icarus ? (dump_waves)
+      - tb_py
+    tools:
+      icarus:
+        iverilog_options:
+          - -g2012
+          - '-s dump_waves'
+        vvp_options:
+          - -M $(shell cocotb-config --lib-dir)
+          - -m $(shell cocotb-config --lib-name vpi icarus)

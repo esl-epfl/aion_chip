@@ -60,6 +60,12 @@ sim_verilator: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=cgra TOO
 sim_all: ## Run both icarus and verilator simulations and print a colored summary
 	@$(PYTHON) $(PROJECT_ROOT)/scripts/sim_all.py
 
+post_synth_sim: TARGET := post_synth_sim
+post_synth_sim: TOOL := icarus
+post_synth_sim: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=cgra TOOL=verilator) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
+	COCOTB_DUT_WRAPPED=1 \
+	$(FUSESOC) --verbose run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
+
 # --------------------------------------------------
 # FuseSoc Setup & Clean
 # --------------------------------------------------
