@@ -30,7 +30,7 @@ architecture arch of aion_soc is
       rst_n  : in  std_logic;
       opA    : in  std_logic_vector(15 downto 0);
       opB    : in  std_logic_vector(15 downto 0);
-      opcode : in  std_logic;
+      opcode : in  std_logic_vector(3 downto 0);
       start  : in  std_logic;
       result : out std_logic_vector(15 downto 0);
       done   : out std_logic
@@ -46,7 +46,7 @@ architecture arch of aion_soc is
       uo_out  : out std_ulogic_vector(7 downto 0);
       opA     : out std_logic_vector(15 downto 0);
       opB     : out std_logic_vector(15 downto 0);
-      opcode  : out std_logic;
+      opcode  : out std_logic_vector(3 downto 0);
       start   : out std_logic;
       result  : in  std_logic_vector(15 downto 0);
       done    : in  std_logic
@@ -55,7 +55,7 @@ architecture arch of aion_soc is
 
   signal opA    : std_logic_vector(15 downto 0);
   signal opB    : std_logic_vector(15 downto 0);
-  signal opcode : std_logic;
+  signal opcode : std_logic_vector(3 downto 0);
   signal start  : std_logic;
   signal result_i : std_logic_vector(15 downto 0);
   signal done_i : std_logic;

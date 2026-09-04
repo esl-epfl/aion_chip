@@ -19,7 +19,7 @@ entity aion_interface is
     uo_out  : out std_ulogic_vector(7 downto 0);  -- read data
     opA     : out std_logic_vector(15 downto 0);
     opB     : out std_logic_vector(15 downto 0);
-    opcode  : out std_logic;
+    opcode  : out std_logic_vector(3 downto 0);
     start   : out std_logic;
     result  : in  std_logic_vector(15 downto 0);
     done    : in  std_logic
@@ -59,14 +59,15 @@ begin
   -- ----------------------------------------------------------------
   opA    <= std_logic_vector(reg_opA_hi) & std_logic_vector(reg_opA_lo);
   opB    <= std_logic_vector(reg_opB_hi) & std_logic_vector(reg_opB_lo);
-  opcode <= std_logic(reg_control(0));
+  opcode <= std_logic_vector(reg_control(3 downto 0));
   start  <= std_logic(start_pulse);
 
   -- ----------------------------------------------------------------
   -- Start pulse generation
-  -- A write to address 4 with bit 1 set generates a one-cycle pulse.
+  -- A write to address 4 with bit 7 set generates a one-cycle pulse.
+  -- Bits 3:0 of reg_control carry the ALU opcode.
   -- ----------------------------------------------------------------
-  start_pulse <= '1' when (write_en = '1' and addr = "100" and uio_in(1) = '1') else '0';
+  start_pulse <= '1' when (write_en = '1' and addr = "100" and uio_in(7) = '1') else '0';
 
   process (clk, rst_n) is
   begin

@@ -1,20 +1,91 @@
 {
+  "//": [
+    "AION SoC - LibreLane configuration template.",
+    "",
+    "This file is never handed to LibreLane directly. scripts/prepare_librelane_config.py",
+    "resolves the source list from FuseSoC, rewrites paths relative to the run",
+    "directory, applies the '_modes' overlay for the requested target and writes",
+    "the result to <run dir>/config.json. The '//' and '_modes' keys are stripped",
+    "on the way out.",
+    "",
+    "Targets:  make synth | make pnr | make pnr_simple"
+  ],
+
   "meta": {
     "flow": "VHDLClassic"
   },
+
   "DESIGN_NAME": "tt_um_aion",
+
   "VHDL_FILES": [
-    "dir::../src/rtl/add.vhd",
-    "dir::../src/rtl/mult.vhd",
-    "dir::../src/rtl/posit_alu.vhd",
-    "dir::../src/rtl/aion_soc.vhd",
-    "dir::../src/rtl/aion_soc_mapped.vhd"
+    "dir::rtl/add.vhd",
+    "dir::rtl/mult.vhd",
+    "dir::rtl/posit_compare.vhd",
+    "dir::rtl/posit_bitwise.vhd",
+    "dir::rtl/posit_alu.vhd",
+    "dir::rtl/aion_soc.vhd",
+    "dir::rtl/aion_interface.vhd",
+    "dir::rtl/tt_um_aion.vhd"
   ],
-  "CLOCK_PERIOD": 20,
-  "CLOCK_PORT": "clk",
-  "SYNTH_HIERARCHY_MODE": "keep",
   "GHDL_ARGUMENTS": "--std=08 -fsynopsys -fexplicit",
+
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 20,
+
+  "SYNTH_STRATEGY": "DELAY 4",
+  "SYNTH_ABC_BUFFERING": false,
+  "SYNTH_SHARE_RESOURCES": true,
+  "SYNTH_TIE_UNDEFINED": "low",
+
   "FP_SIZING": "absolute",
   "DIE_AREA": [0, 0, 660, 210],
-  "CORE_AREA": [10, 10, 650, 200]
+  "CORE_AREA": [9.6, 11.34, 650.4, 200.34],
+  "PL_TARGET_DENSITY_PCT": 45,
+
+  "RUN_HEURISTIC_DIODE_INSERTION": true,
+  "GRT_ALLOW_CONGESTION": false,
+  "ERRORS_ON_UNMATCHED_IO": "both",
+
+  "_modes": {
+    "//": [
+      "Overlays merged on top of the base configuration by",
+      "scripts/prepare_librelane_config.py. 'lenient' is applied last and is",
+      "enabled with LENIENT=1 on any make target."
+    ],
+
+    "synth": {},
+
+    "pnr": {
+      "//": "PnR from a pre-existing netlist that may instantiate AI-generated cells.",
+      "RSZ_DONT_TOUCH_RX": "^aion_.*"
+    },
+
+    "pnr_simple": {},
+
+    "lenient": {
+      "//": [
+        "Downgrade every hard checker so a broken custom cell still yields a",
+        "GDS and a full set of reports to look at. Never use for signoff."
+      ],
+      "ERROR_ON_TR_DRC": false,
+      "ERROR_ON_DISCONNECTED_PINS": false,
+      "ERROR_ON_LONG_WIRE": false,
+      "ERROR_ON_PDN_VIOLATIONS": false,
+      "ERROR_ON_NL_ASSIGN_STATEMENTS": false,
+      "ERROR_ON_SYNTH_CHECKS": false,
+      "ERROR_ON_UNMAPPED_CELLS": false,
+      "ERRORS_ON_UNMATCHED_IO": "none",
+      "ERROR_ON_MAGIC_DRC": false,
+      "ERROR_ON_KLAYOUT_DRC": false,
+      "ERROR_ON_ILLEGAL_OVERLAPS": false,
+      "ERROR_ON_XOR_ERROR": false,
+      "ERROR_ON_LVS_ERROR": false,
+      "TIMING_VIOLATION_CORNERS": [],
+      "SETUP_VIOLATION_CORNERS": [],
+      "HOLD_VIOLATION_CORNERS": [],
+      "MAX_SLEW_VIOLATION_CORNERS": [],
+      "MAX_CAP_VIOLATION_CORNERS": [],
+      "GRT_ALLOW_CONGESTION": true
+    }
+  }
 }

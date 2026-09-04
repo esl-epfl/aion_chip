@@ -42,7 +42,7 @@ endif
 # ------------------------------------------------------------------------------
 # Targets
 # ------------------------------------------------------------------------------
-.PHONY: all sim sim_verilator sim_all setup format clean waves librelane-openroad librelane-klayout synth _save_synth _setup_cocotb_env
+.PHONY: all sim sim_verilator sim_all setup format clean waves synth pnr pnr_simple librelane openroad klayout librelane-openroad librelane-klayout _save_run _setup_cocotb_env
 
 all: sim
 
@@ -79,6 +79,10 @@ format: ## Format the codebase
 clean:  ## Clean up custom generated build directory
 	rm -rf $(BUILD_DIR)/
 
+clean-artifacts:  ## Clean up generated artifacts in src/misc/ and implementation/
+	rm -rf src/misc/$(CORE).fst src/misc/$(CORE).gtkw src/misc/$(CORE).surf.ron
+	rm -rf $(IMPL_DIR)/synth $(IMPL_DIR)/pnr $(IMPL_DIR)/pnr_simple
+
 waves:
 	@if [ "$(WAVEFORM_VIEWER)" = "gtkwave" ]; then \
 		$(WAVEFORM_VIEWER) $(BUILD_DIR)/$(CORE).ghw src/misc/$(CORE).gtkw; \
@@ -90,21 +94,51 @@ waves:
 
 # ------------------------------------------------------------------------------
 # Physical Implementation Flow (LibreLane via Docker)
+#
+#   make synth       RTL -> gate-level netlist + pre-PnR STA
+#   make pnr         netlist + AI-generated cells -> GDS
+#   make pnr_simple  RTL -> GDS, PDK standard cells only (the baseline)
+#
+# Pass LENIENT=1 to any of them to downgrade the hard checkers to warnings.
 # ------------------------------------------------------------------------------
+PROJECT_ROOT         ?= $(CURDIR)
 PDK                  ?= ihp-sg13g2
 PDK_ROOT             ?= /foss/pdks
-LIBRELANE_RUN_DIR    := $(BUILD_DIR)/librelane_$(CORE)
-FLOW_FINAL_DIR        = $(LIBRELANE_RUN_DIR)/final
-LIBRELANE_CONFIG_SRC  = $(PROJECT_ROOT)/implementation/config.json
-LIBRELANE_CONFIG      = $(LIBRELANE_RUN_DIR)/config.json
-LIBRELANE_PIN_ORDER   = $(PROJECT_ROOT)/implementation/pin_order.cfg
+LENIENT              ?= 0
+
+IMPL_DIR              = $(PROJECT_ROOT)/implementation
+LIBRELANE_CONFIG_SRC  = $(IMPL_DIR)/config.json
+LIBRELANE_SDC         = $(IMPL_DIR)/constraints/aion.sdc
+LIBRELANE_PIN_ORDER   = $(IMPL_DIR)/pin_order.cfg
+
+# Directory of AI-generated cell views (LEF/LIB/GDS/Verilog/SPICE), consumed by
+# `make pnr` only. Empty or absent means "PDK standard cells only".
+CELLS_DIR            ?= $(IMPL_DIR)/cells
+
+# Netlist `make pnr` hardens. Defaults to whatever `make synth` last saved;
+# point it at the AI-rewritten netlist once the cell substitution has run.
+NETLIST              ?= $(IMPL_DIR)/synth/nl/$(TOPLEVEL).nl.v
+
+SYNTH_RUN_DIR        := $(BUILD_DIR)/synth_$(CORE)
+PNR_RUN_DIR          := $(BUILD_DIR)/pnr_$(CORE)
+PNR_SIMPLE_RUN_DIR   := $(BUILD_DIR)/pnr_simple_$(CORE)
+
+# Run directory the GUI targets open. Override to inspect a different run,
+# e.g. `make openroad VIEW_RUN_DIR=.build/pnr_aion`.
+VIEW_RUN_DIR         ?= $(PNR_SIMPLE_RUN_DIR)
+
+LENIENT_FLAG         := $(if $(filter-out 0,$(LENIENT)),--lenient,)
+
+# Extra flags forwarded to librelane, e.g. LIBRELANE_ARGS="--to OpenROAD.Floorplan"
+LIBRELANE_ARGS       ?=
 
 # Internal helpers for joining lists
 comma := ,
 space := $(subst ,, )
 
+# $(1) run directory, $(2) mode, $(3) extra flags for the prepare script
 define librelane_prepare
-	@mkdir -p $(1)/rtl $(2)
+	@mkdir -p $(1)/rtl $(1)/final
 	@$(eval _RTL_FILES := $(shell $(PYTHON) $(PROJECT_ROOT)/scripts/extract_fusesoc_sources.py \
 		--core $(CORE_NAME) \
 		--target librelane \
@@ -119,72 +153,116 @@ define librelane_prepare
 	done
 	@$(PYTHON) $(PROJECT_ROOT)/scripts/prepare_librelane_config.py \
 		--src-config $(LIBRELANE_CONFIG_SRC) \
-		--dst-config $(3) \
+		--dst-config $(1)/config.json \
 		--ip-dir $(1) \
+		--project-root $(PROJECT_ROOT) \
+		--mode $(2) \
+		--sdc $(LIBRELANE_SDC) \
 		--vhdl-files "$(subst $(space),$(comma),$(addprefix $(1)/rtl/,$(notdir $(_RTL_FILES))))" \
-		$(4)
+		$(3)
 endef
 
-librelane: ## Run LibreLane physical implementation flow inside $(BUILD_DIR)
-	$(call librelane_prepare,$(LIBRELANE_RUN_DIR),$(FLOW_FINAL_DIR),$(LIBRELANE_CONFIG),)
-	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
+# $(1) run directory, $(2) extra flags for librelane
+#
+# The exit status is stashed rather than propagated, so that a flow which dies
+# late still gets its reports collected. librelane_finish re-raises it.
+define librelane_run
+	@( cd $(1) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
 		--pdk $(PDK) \
 		--pdk-root $(PDK_ROOT) \
 		--manual-pdk \
-		--save-views-to ./final/
+		--save-views-to ./final/ \
+		$(2) $(LIBRELANE_ARGS) ); \
+	status=$$?; \
+	echo $$status > $(1)/.exit_status; \
+	if [ $$status -ne 0 ]; then \
+		echo "LibreLane exited with status $$status — collecting artifacts anyway."; \
+	fi
+endef
 
-# Latest LibreLane synthesis run directory (timestamped).
-SYNTH_RUN_DIR        := $(BUILD_DIR)/synth_$(CORE)
-SYNTH_CONFIG          = $(SYNTH_RUN_DIR)/config.json
-SYNTH_LATEST_RUN     := $(lastword $(sort $(wildcard $(SYNTH_RUN_DIR)/runs/RUN_*)))
+# $(1) run directory
+define librelane_finish
+	@status=$$(cat $(1)/.exit_status 2>/dev/null || echo 1); \
+	if [ "$$status" -ne 0 ]; then \
+		echo "LibreLane failed (exit $$status); the artifacts above are from that failed run."; \
+	fi; \
+	exit $$status
+endef
 
-synth: ## Run LibreLane synthesis only inside $(BUILD_DIR)/synth_$(CORE)
-	$(call librelane_prepare,$(SYNTH_RUN_DIR),$(SYNTH_RUN_DIR)/final,$(SYNTH_CONFIG),--synth-only)
-	@cd $(SYNTH_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
-		--pdk $(PDK) \
-		--pdk-root $(PDK_ROOT) \
-		--manual-pdk \
-		--save-views-to ./final/
-	@$(MAKE) _save_synth
+synth: ## Synthesis + pre-PnR STA -> implementation/synth/
+	$(call librelane_prepare,$(SYNTH_RUN_DIR),synth,$(LENIENT_FLAG))
+	$(call librelane_run,$(SYNTH_RUN_DIR),)
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(SYNTH_RUN_DIR) OUT_DIR=$(IMPL_DIR)/synth
+	$(call librelane_finish,$(SYNTH_RUN_DIR))
 
-librelane-openroad: ## Open the last LibreLane run in OpenROAD GUI
-	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
+pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=)
+	@$(PYTHON) $(PROJECT_ROOT)/scripts/collect_cells.py $(CELLS_DIR) $(LENIENT_FLAG)
+	@if [ ! -f "$(NETLIST)" ]; then \
+		echo "Error: netlist not found: $(NETLIST)"; \
+		echo "       run 'make synth' first, or pass NETLIST=<path/to/netlist.v>"; \
+		exit 1; \
+	fi
+	@mkdir -p $(PNR_RUN_DIR)/nl
+	@cp -v $(NETLIST) $(PNR_RUN_DIR)/nl/$(TOPLEVEL).nl.v
+	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,--pin-order $(LIBRELANE_PIN_ORDER) --cells-dir $(CELLS_DIR) $(LENIENT_FLAG))
+	$(call librelane_run,$(PNR_RUN_DIR),--from Checker.NetlistAssignStatements -e nl=nl/$(TOPLEVEL).nl.v)
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(IMPL_DIR)/pnr
+	$(call librelane_finish,$(PNR_RUN_DIR))
+
+pnr_simple: ## Full RTL -> GDS flow with the PDK standard cells only
+	$(call librelane_prepare,$(PNR_SIMPLE_RUN_DIR),pnr_simple,--pin-order $(LIBRELANE_PIN_ORDER) $(LENIENT_FLAG))
+	$(call librelane_run,$(PNR_SIMPLE_RUN_DIR),)
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_SIMPLE_RUN_DIR) OUT_DIR=$(IMPL_DIR)/pnr_simple
+	$(call librelane_finish,$(PNR_SIMPLE_RUN_DIR))
+
+librelane: pnr_simple ## Alias for pnr_simple
+
+openroad: ## Open the last run in the OpenROAD GUI (VIEW_RUN_DIR=)
+	@cd $(VIEW_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
 		--pdk $(PDK) \
 		--pdk-root $(PDK_ROOT) \
 		--manual-pdk \
 		--last-run \
 		--flow OpenInOpenROAD
-.PHONY: librelane-openroad
 
-librelane-klayout: ## Open the last LibreLane run in KLayout
-	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
+klayout: ## Open the last run in KLayout (VIEW_RUN_DIR=)
+	@cd $(VIEW_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh librelane config.json \
 		--pdk $(PDK) \
 		--pdk-root $(PDK_ROOT) \
 		--manual-pdk \
 		--last-run \
 		--flow OpenInKLayout
 
+librelane-openroad: openroad
+librelane-klayout: klayout
+
 # ------------------------------------------------------------------------------
 # Utils targets
 # ------------------------------------------------------------------------------
-_save_synth:
-	@if [ -z "$(SYNTH_LATEST_RUN)" ]; then \
-		echo "Error: no synthesis run found in $(SYNTH_RUN_DIR)/runs/"; \
+# Copy the views, metrics and reports of the latest run in RUN_DIR to OUT_DIR.
+_save_run:
+	@run=$$(ls -d $(RUN_DIR)/runs/RUN_* 2>/dev/null | sort | tail -n 1); \
+	if [ -z "$$run" ]; then \
+		echo "Error: no run found in $(RUN_DIR)/runs/"; \
 		exit 1; \
-	fi
-	@mkdir -p $(PROJECT_ROOT)/implementation/synth/reports
-	@mkdir -p $(PROJECT_ROOT)/implementation/synth/logs
-	@echo "Copying synthesis artifacts from $(SYNTH_LATEST_RUN) to $(PROJECT_ROOT)/implementation/synth/"
-	@cp -v $(SYNTH_LATEST_RUN)/final/nl/$(TOPLEVEL).nl.v $(PROJECT_ROOT)/implementation/synth/
-	@cp -v $(SYNTH_LATEST_RUN)/final/metrics.csv $(PROJECT_ROOT)/implementation/synth/logs/
-	@cp -v $(SYNTH_LATEST_RUN)/final/metrics.json $(PROJECT_ROOT)/implementation/synth/logs/
-	@cp -v $(SYNTH_LATEST_RUN)/flow.log $(PROJECT_ROOT)/implementation/synth/logs/
-	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/stat.rpt $(PROJECT_ROOT)/implementation/synth/reports/
-	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/latch.rpt $(PROJECT_ROOT)/implementation/synth/reports/
-	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/chk.rpt $(PROJECT_ROOT)/implementation/synth/reports/
-	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/pre_synth_chk.rpt $(PROJECT_ROOT)/implementation/synth/reports/
-	@cp -v $(SYNTH_LATEST_RUN)/1-yosys-vhdlsynthesis/reports/post_dff.rpt $(PROJECT_ROOT)/implementation/synth/reports/
-	@echo "Synthesis artifacts saved to $(PROJECT_ROOT)/implementation/synth/"
+	fi; \
+	case "$(OUT_DIR)" in \
+		$(IMPL_DIR)/?*) ;; \
+		*) echo "Error: refusing to clean OUT_DIR='$(OUT_DIR)' outside $(IMPL_DIR)/"; exit 1 ;; \
+	esac; \
+	echo "Saving artifacts from $$run to $(OUT_DIR)/"; \
+	rm -rf $(OUT_DIR); \
+	mkdir -p $(OUT_DIR)/reports $(OUT_DIR)/logs; \
+	if [ -d "$$run/final" ]; then cp -r "$$run/final/." $(OUT_DIR)/; fi; \
+	for f in flow.log resolved.json; do \
+		[ -f "$$run/$$f" ] && cp "$$run/$$f" $(OUT_DIR)/logs/; \
+	done; \
+	find "$$run" -mindepth 2 -name '*.rpt' -type f | while read -r rpt; do \
+		rel=$$(printf '%s' "$${rpt#$$run/}" | sed 's|/reports/|/|'); \
+		mkdir -p "$(OUT_DIR)/reports/$$(dirname "$$rel")"; \
+		cp "$$rpt" "$(OUT_DIR)/reports/$$rel"; \
+	done; \
+	echo "Artifacts saved to $(OUT_DIR)/"
 
 # ------------------------------------------------------------------------------
 # Cocotb Variable Export Routine

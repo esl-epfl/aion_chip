@@ -20,3 +20,5 @@ implementation/synth/
 *.obj
 *.vcd
 *.fst
+implementation/pnr/
+implementation/pnr_simple/
