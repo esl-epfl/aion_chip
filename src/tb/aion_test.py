@@ -237,9 +237,7 @@ async def test_posit_fixed_int_compare(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    await _run_compare_tests(
-        dut, OP_A_INT_FIXED, OP_B_INT_FIXED, "FIXED_INT_COMPARE"
-    )
+    await _run_compare_tests(dut, OP_A_INT_FIXED, OP_B_INT_FIXED, "FIXED_INT_COMPARE")
     await FallingEdge(dut.clk)
 
 
@@ -250,9 +248,7 @@ async def test_posit_fixed_int_bitwise(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    await _run_bitwise_tests(
-        dut, OP_A_INT_FIXED, OP_B_INT_FIXED, "FIXED_INT_BITWISE"
-    )
+    await _run_bitwise_tests(dut, OP_A_INT_FIXED, OP_B_INT_FIXED, "FIXED_INT_BITWISE")
     await FallingEdge(dut.clk)
 
 

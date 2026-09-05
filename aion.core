@@ -28,117 +28,251 @@ filesets:
       - src/misc/dump_waves.v
     file_type: verilogSource
 
+  sdf_annotate:
+    files:
+      - src/misc/sdf_annotate.v
+    file_type: verilogSource
+
   tb_py:
     files:
       - src/tb/aion_test.py
     file_type: user
 
-  post_synth_netlist:
-    depend:
-      - epfl:aion:tech:1.0.0
-    files:
-      - implementation/synth/nl/tt_um_aion.nl.v
-    file_type: verilogSource
+  # Gate-level cell models. `tech` carries the zero-delay variants and is the
+  # only set Verilator can use; `tech_timing` keeps the specify blocks an SDF
+  # needs and is Icarus-only. See tech/tech.core.
+  cells_nodelay:
+    depend: [epfl:aion:tech:1.0.0]
 
-  verilator-waivers:
-    files:
-      - src/misc/aion.vlt
-    file_type: vlt
+  cells_timing:
+    depend: [epfl:aion:tech_timing:1.0.0]
+
+  # Netlists produced by the physical flow. Each of these resolves to a fixed
+  # path under flow/, rewritten by the corresponding make target.
+  synth_netlist:
+    depend: [epfl:aion:flow_synth:1.0.0]
+
+  pnr_netlist:
+    depend: [epfl:aion:flow_pnr:1.0.0]
+
+  pnr_simple_netlist:
+    depend: [epfl:aion:flow_pnr_simple:1.0.0]
+
+parameters:
+  sdf_file:
+    datatype: str
+    paramtype: plusarg
+    description: |
+      SDF to back-annotate onto the gate netlist. Read by
+      src/misc/sdf_annotate.v; Icarus only.
+
+  dumpfile:
+    datatype: str
+    paramtype: plusarg
+    description: |
+      Where the Icarus run writes its FST. Defaults to aion.fst in the
+      target's own run directory.
+
+  dumpdepth:
+    datatype: int
+    paramtype: plusarg
+    description: |
+      Hierarchy levels below tt_um_aion to dump. 0 dumps everything, which on
+      a ~12k-cell netlist is slow and enormous; the gate-level targets pass 1.
 
 targets:
   default: &default
     filesets:
       - rtl
-      - tool_verilator ? (verilator-waivers)
     toplevel: tt_um_aion
-
-  rtl_sim:
-    <<: *default
-    description: Perform RTL simulation of the AION SoC
-    default_tool: icarus
-    filesets_append:
-      - dump_waves
-      - simulation-top
-      - tb_py
-    tools:
-      icarus:
-        iverilog_options:
-          - -g2012
-          - '-s dump_waves'
-        vvp_options:
-          - -M $(shell cocotb-config --lib-dir)
-          - -m $(shell cocotb-config --lib-name vpi icarus)
-  
-  rtl_sim_ghdl:
-    <<: *default
-    description: Perform RTL simulation of the AION SoC
-    default_tool: ghdl
-    filesets_append:
-      - tb_py
-    tools:
-      ghdl:
-        analyze_options:
-          - -fsynopsys
-          - -fexplicit
-        run_options:
-          - --ieee-asserts=disable
-          - --vpi=$(shell cocotb-config --lib-dir)/libcocotbvpi_ghdl.so
-          - --wave=../../aion.ghw
-          - --fst=../../aion.fst
-
-  rtl_sim_verilator:
-    <<: *default
-    description: Perform RTL simulation of the AION SoC with Verilator
-    default_tool: verilator
-    toplevel: tt_um_aion
-    filesets_append:
-      - tb_py
-    tools:
-      verilator:
-        mode: cc
-        verilator_options:
-          - '--sv'
-          - '--cc'
-          - '--trace'
-          - '--trace-fst'
-          - '--trace-structs'
-          - '--trace-params'
-          - '--trace-max-array 1024'
-          - '--x-assign unique'
-          - '--x-initial unique'
-          - '--timing'
-          - '--vpi'
-          - '--prefix Vtop'
-          - '-o Vtop'
-          - '--public-flat-rw'
-          - '-CFLAGS "-Wall -fpermissive"'
-          - '-LDFLAGS "-pthread -lutil"'
-          - '-LDFLAGS "-Wl,-rpath,$(shell cocotb-config --lib-dir) -L$(shell cocotb-config --lib-dir) -lcocotbvpi_verilator" $(shell cocotb-config --share)/lib/verilator/verilator.cpp'
-          - "-Wall"
-        make_options:
-          - '-j$(shell N=$$(nproc 2>/dev/null || echo 4); [ "$$N" -le 8 ] && echo "$$N" || echo 8)'
-        run_options:
-          - '--trace'
-          - '--trace-file'
-          - '../../aion.fst'
 
   librelane:
     <<: *default
     description: Collect RTL sources for LibreLane physical implementation
 
-  post_synth_sim:
-    description: Perform RTL simulation of the AION SoC
-    default_tool: verilator
+  # ----------------------------------------------------------------------
+  # Simulation
+  #
+  # All of these use the Edalize Flow API (`flow: sim`), which knows how to
+  # wire cocotb into each simulator: the VPI library, the Verilator `Vtop`
+  # prefix and its C++ main, COCOTB_TEST_MODULES. None of that is repeated
+  # below -- only what is specific to this design.
+  # ----------------------------------------------------------------------
+  rtl_sim:
+    <<: *default
+    description: RTL simulation of the AION SoC (GHDL, the only VHDL simulator here)
+    flow: sim
+    flow_options:
+      tool: ghdl
+      cocotb_module: aion_test
+      analyze_options:
+        - -fsynopsys
+        - -fexplicit
+      # Anything GHDL calls a *simulation* option has to follow the toplevel
+      # unit on the command line, which is what `sim_options` does; putting
+      # these under `run_options` puts them before it and GHDL rejects them.
+      sim_options:
+        - --ieee-asserts=disable
+        - --wave=aion.ghw
+        - --fst=aion.fst
+
+  # ----------------------------------------------------------------------
+  # Gate level
+  #
+  # The three anchors below hold the per-simulator settings; the concrete
+  # targets only choose a netlist and a cell model set.
+  #
+  # They are deliberately not nested: FuseSoC concatenates a list that
+  # comes from a merge key with the list that overrides it, so a target
+  # inheriting flow_options and then respecifying iverilog_options ends up
+  # passing every option twice -- and a repeated `-s <root>` segfaults
+  # iverilog. Each anchor therefore spells out its whole flow_options.
+  #
+  # Shared by the Icarus anchors:
+  #   -gspecify       keep the specify blocks; without it iverilog parses and
+  #                   discards them, and $sdf_annotate has nothing to attach to
+  #   -ginterconnect  let the SDF's INTERCONNECT records -- the wire delays,
+  #                   i.e. the point of a post-PnR run -- resolve to a net
+  #   -Ttyp           take the typical column of each min:typ:max SDF triplet
+  #
+  # Every extra root module needs its own -s, because Edalize already passes
+  # -s<toplevel>, which switches iverilog from "elaborate every root" to
+  # "elaborate exactly what I list". Never add '-s tt_um_aion' back.
+  _gate_icarus: &gate_icarus
+    description: Internal - Icarus settings shared by the untimed gate-level targets
     toplevel: tt_um_aion
-    filesets_append:
-      - post_synth_netlist
-      - tool_icarus ? (dump_waves)
+    flow: sim
+    parameters:
+      - dumpfile
+      - dumpdepth
+    flow_options:
+      tool: icarus
+      cocotb_module: aion_test
+      iverilog_options:
+        - -g2012
+        - -gspecify
+        - -ginterconnect
+        - -Ttyp
+        - '-s dump_waves'
+
+  _gate_icarus_sdf: &gate_icarus_sdf
+    description: Internal - as above, plus the SDF back-annotation root module
+    toplevel: tt_um_aion
+    flow: sim
+    parameters:
+      - sdf_file
+      - dumpfile
+      - dumpdepth
+    flow_options:
+      tool: icarus
+      cocotb_module: aion_test
+      iverilog_options:
+        - -g2012
+        - -gspecify
+        - -ginterconnect
+        - -Ttyp
+        - '-s dump_waves'
+        - '-s sdf_annotate'
+
+  _gate_verilator: &gate_verilator
+    description: Internal - Verilator settings shared by the gate-level targets
+    toplevel: tt_um_aion
+    flow: sim
+    flow_options:
+      tool: verilator
+      cocotb_module: aion_test
+      mode: cc
+      verilator_options:
+        - '--cc'
+        - '--timing'
+        - '--trace'
+        - '--trace-fst'
+        - '--trace-structs'
+        - '--x-assign unique'
+        - '--x-initial unique'
+        # A gate netlist trips all of these wholesale, and none of them say
+        # anything about the design: the cell library is vendor code and the
+        # netlist is machine-written.
+        - '-Wno-fatal'
+        - '-Wno-SPECIFYIGN'
+        - '-Wno-TIMESCALEMOD'
+        - '-Wno-DECLFILENAME'
+        - '-Wno-PINCONNECTEMPTY'
+        - '-Wno-UNOPTFLAT'
+        - '-Wno-WIDTHEXPAND'
+        - '-Wno-MULTITOP'
+        - '-CFLAGS "-Wall -fpermissive"'
+        - '-LDFLAGS "-pthread -lutil"'
+      make_options:
+        - '-j$(shell N=$$(nproc 2>/dev/null || echo 4); [ "$$N" -le 8 ] && echo "$$N" || echo 8)'
+      # Written into this target's own run directory, so the stages do not
+      # overwrite each other's traces. `make waves TARGET=<target>` finds it.
+      run_options:
+        - '--trace'
+        - '--trace-file'
+        - 'aion.fst'
+
+  post_synth_sim:
+    <<: *gate_verilator
+    description: |
+      Post-synthesis gate-level simulation, Verilator. Function only: the
+      synthesis netlist has no placement, so there is no interconnect delay
+      to annotate, and the cells are the zero-delay models.
+    filesets:
+      - synth_netlist
+      - cells_nodelay
       - tb_py
-    tools:
-      icarus:
-        iverilog_options:
-          - -g2012
-          - '-s dump_waves'
-        vvp_options:
-          - -M $(shell cocotb-config --lib-dir)
-          - -m $(shell cocotb-config --lib-name vpi icarus)
+
+  post_synth_sim_icarus:
+    <<: *gate_icarus
+    description: The post_synth_sim netlist under Icarus. Also untimed.
+    filesets:
+      - synth_netlist
+      - cells_nodelay
+      - dump_waves
+      - tb_py
+
+  post_pnr_sim:
+    <<: *gate_icarus_sdf
+    description: |
+      Post-PnR gate-level simulation of `make pnr_simple`, with the SDF
+      back-annotated onto the specify-carrying cell models. Needs
+      +sdf_file=, which the Makefile passes.
+
+      This is the delay-annotated functional run, NOT a timing signoff.
+      Icarus applies the SDF's IOPATH and INTERCONNECT records but
+      implements no timing checks at all: it prints "Timing checks are not
+      supported" for every $setuphold/$recrem/$width in the cell models and
+      "TIMINGCHECK not supported" for every one of the SDF's per-flop
+      TIMINGCHECK blocks. The `notifier` reg never toggles, so the row of
+      the ihp_dff_r UDP that drives Q to x on a violation is unreachable and
+      a setup or hold failure latches a clean but wrong value in silence.
+      Setup and hold live in the STA reports under
+      flow/pnr_simple/reports/*-openroad-stapostpnr/.
+    filesets:
+      - pnr_simple_netlist
+      - cells_timing
+      - dump_waves
+      - sdf_annotate
+      - tb_py
+
+  post_pnr_sim_ai:
+    <<: *gate_icarus_sdf
+    description: post_pnr_sim against the output of `make pnr` (AI-generated cells).
+    filesets:
+      - pnr_netlist
+      - cells_timing
+      - dump_waves
+      - sdf_annotate
+      - tb_py
+
+  post_pnr_sim_verilator:
+    <<: *gate_verilator
+    description: |
+      The post-PnR netlist under Verilator. UNTIMED -- Verilator drops
+      $sdf_annotate, so this only re-checks the function of the placed
+      netlist. A pass here is not a timing result.
+    filesets:
+      - pnr_simple_netlist
+      - cells_nodelay
+      - tb_py

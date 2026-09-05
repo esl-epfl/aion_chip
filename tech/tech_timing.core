@@ -1,0 +1,27 @@
+CAPI=2:
+
+# ================================================================
+#  Project:     AION
+#  Author:      Filippo Quadri <filippo.quadri@epfl.ch>
+#  Created:     2026-09-04
+#  Description: IHP SG13G2 standard cells - timing simulation models
+# ================================================================
+
+name: epfl:aion:tech_timing:1.0.0
+description: |
+  SG13G2 standard cell models with their `specify` blocks intact, so an SDF
+  can be back-annotated onto them. Only Icarus consumes these: Verilator
+  drops `specify` and `$sdf_annotate`, which would leave every sequential
+  cell with an undriven clock. Use epfl:aion:tech:1.0.0 there instead.
+
+filesets:
+  rtl:
+    files:
+      - rtl/sg13g2_udp.v
+      - rtl/sg13g2_stdcell.v
+    file_type: verilogSource
+
+targets:
+  default: &default
+    filesets:
+      - rtl

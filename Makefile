@@ -12,13 +12,16 @@ include scripts/utils.mk
 # ------------------------------------------------------------------------------
 CORE         ?= aion
 CORE_NAME     = epfl:aion:$(CORE):1.0.0
-TARGET       ?= rtl_sim_ghdl
-TOOL         ?= ghdl
 BUILD_DIR    ?= .build
 
 TOPLEVEL     ?= tt_um_aion
-SIM_MODULE   ?= $(CORE)_test
 TEST_DIRS    ?= src/tb/
+
+# Where FuseSoC works for the current target, and so where that target's
+# waveform lands.
+SIM_WORK_DIR  = $(BUILD_DIR)/$(subst :,_,$(CORE_NAME))/$(TARGET)
+
+PROJECT_ROOT ?= $(CURDIR)
 
 # Waveform Viewer - <surfer/gtkwave>
 WAVEFORM_VIEWER ?= surfer
@@ -26,10 +29,9 @@ WAVEFORM_VIEWER ?= surfer
 # ------------------------------------------------------------------------------
 # Tools
 # ------------------------------------------------------------------------------
-FUSESOC         := $(shell which fusesoc)
-PYTHON          := $(shell which python)
-VERIBLE_FORMAT  := $(shell which verible-verilog-format)
-VSG             := $(shell which vsg)
+FUSESOC := $(shell which fusesoc)
+PYTHON  := $(shell which python)
+VSG     := $(shell which vsg)
 
 # ------------------------------------------------------------------------------
 # Dynamic Environment & Conda Path Fixes
@@ -39,38 +41,106 @@ ifdef CONDA_PREFIX
 	export LD_PRELOAD      := $(CONDA_PREFIX)/lib/libpython3.12.so.1.0
 endif
 
-# ------------------------------------------------------------------------------
-# Targets
-# ------------------------------------------------------------------------------
-.PHONY: all sim sim_verilator sim_all setup format clean waves synth pnr pnr_simple librelane openroad klayout librelane-openroad librelane-klayout _save_run _setup_cocotb_env
+.PHONY: all sim post_synth_sim post_pnr_sim post_pnr_sim_ai sim_all setup format \
+        clean clean-impl clean-flow clean-all waves synth pnr pnr_simple librelane \
+        openroad klayout _save_run _setup_cocotb_env _require_sdf
 
 all: sim
 
-sim: TARGET := rtl_sim_ghdl
-sim: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=aion TOOL=icarus) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
-	COCOTB_DUT_WRAPPED=0 \
-	$(FUSESOC) run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
+# ==============================================================================
+# Simulation
+#
+#   make sim             VHDL RTL, GHDL
+#   make post_synth_sim  synthesis netlist, Verilator (TOOL=icarus for Icarus)
+#   make post_pnr_sim    placed netlist + SDF, Icarus  -- delays, but not signoff
+#   make sim_all         all of the above, with a summary table
+#
+# GHDL is the only simulator that reads the VHDL sources, so the RTL simulation
+# has exactly one backend. Verilator and Icarus only ever see gate-level
+# Verilog, which is why they appear from post-synthesis onwards and not before.
+# ==============================================================================
+# The simulation targets use the Edalize Flow API, which takes its simulator
+# from the core file, so no --tool is passed here. TOOL only selects which of
+# the per-simulator FuseSoC targets to run.
+TARGET ?= rtl_sim
+TOOL   ?= ghdl
 
-sim_verilator: TARGET := rtl_sim_verilator
-sim_verilator: TOOL := verilator
-sim_verilator: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=cgra TOOL=verilator) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
-	COCOTB_DUT_WRAPPED=1 \
-	$(FUSESOC) run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
+# The SDF corner the post-PnR run annotates. The PnR flow writes one directory
+# per corner. Which one to pick is a question about how much delay you want in
+# the functional run, not about which one will catch a violation -- Icarus
+# discards the SDF's TIMINGCHECK records (see post_pnr_sim below), so no corner
+# can fail on setup or hold. Setup and hold are STA's job; see
+# flow/pnr_simple/reports/*-openroad-stapostpnr/.
+#   nom_typ_1p20V_25C | nom_fast_1p32V_m40C | nom_slow_1p08V_125C
+# SDF_CORNER ?= nom_typ_1p20V_25C
+SDF_CORNER ?= nom_slow_1p08V_125C
+PNR_SDF     = $(FLOW_DIR)/pnr_simple/sdf/$(SDF_CORNER)/$(TOPLEVEL)__$(SDF_CORNER).sdf
 
-sim_all: ## Run both icarus and verilator simulations and print a colored summary
+# Dumping every net of a ~12k-cell netlist costs more than the simulation does.
+# 1 = the DUT's own ports, which is what you want 95% of the time.
+GATE_DUMPDEPTH ?= 1
+
+# Only the Icarus targets declare the plusarg parameters (Verilator has no
+# dump_waves module and no $sdf_annotate to feed), so gate the flag on the tool.
+ICARUS_DUMP = $(if $(filter icarus,$(TOOL)),--dumpdepth=$(GATE_DUMPDEPTH),)
+
+FUSESOC_RUN = $(FUSESOC) run --build-root=$(BUILD_DIR) --target=$(TARGET) $(CORE_NAME)
+
+sim: TARGET := rtl_sim
+sim: TOOL   := ghdl
+sim: _setup_cocotb_env ## RTL simulation of the VHDL sources (GHDL)
+	$(FUSESOC_RUN) $(PARAM_FLAGS)
+
+post_synth_sim: TOOL   := verilator
+post_synth_sim: TARGET  = $(if $(filter icarus,$(TOOL)),post_synth_sim_icarus,post_synth_sim)
+post_synth_sim: _setup_cocotb_env ## Post-synthesis gate-level sim, no timing (TOOL=verilator|icarus)
+	@if [ ! -f "$(FLOW_DIR)/synth/nl/$(TOPLEVEL).nl.v" ]; then \
+		echo "Error: no synthesis netlist at $(FLOW_DIR)/synth/nl/$(TOPLEVEL).nl.v"; \
+		echo "       run 'make synth' first."; \
+		exit 1; \
+	fi
+	$(FUSESOC_RUN) $(ICARUS_DUMP) $(PARAM_FLAGS)
+
+post_pnr_sim: TOOL   := icarus
+post_pnr_sim: TARGET  = $(if $(filter verilator,$(TOOL)),post_pnr_sim_verilator,post_pnr_sim)
+post_pnr_sim: _setup_cocotb_env ## Post-PnR gate-level sim with SDF delays (TOOL=verilator drops the delays)
+	@if [ ! -f "$(FLOW_DIR)/pnr_simple/nl/$(TOPLEVEL).nl.v" ]; then \
+		echo "Error: no post-PnR netlist at $(FLOW_DIR)/pnr_simple/nl/$(TOPLEVEL).nl.v"; \
+		echo "       run 'make pnr_simple' first."; \
+		exit 1; \
+	fi
+ifeq ($(TOOL),verilator)
+	@echo "Warning: Verilator ignores \$$sdf_annotate. This run has NO timing;"
+	@echo "         it only re-checks the function of the placed netlist."
+	$(FUSESOC_RUN) $(PARAM_FLAGS)
+else
+	@$(MAKE) --no-print-directory _require_sdf SDF=$(PNR_SDF)
+	$(FUSESOC_RUN) --sdf_file=$(PNR_SDF) $(ICARUS_DUMP) $(PARAM_FLAGS)
+endif
+
+post_pnr_sim_ai: TARGET := post_pnr_sim_ai
+post_pnr_sim_ai: TOOL   := icarus
+post_pnr_sim_ai: SDF     = $(FLOW_DIR)/pnr/sdf/$(SDF_CORNER)/$(TOPLEVEL)__$(SDF_CORNER).sdf
+post_pnr_sim_ai: _setup_cocotb_env ## Post-PnR sim of the AI-cell flow (output of `make pnr`)
+	@$(MAKE) --no-print-directory _require_sdf SDF=$(SDF)
+	$(FUSESOC_RUN) --sdf_file=$(SDF) $(ICARUS_DUMP) $(PARAM_FLAGS)
+
+sim_all: ## Run every simulation stage and print a summary table
 	@$(PYTHON) $(PROJECT_ROOT)/scripts/sim_all.py
 
-post_synth_sim: TARGET := post_synth_sim
-post_synth_sim: TOOL := icarus
-post_synth_sim: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=cgra TOOL=verilator) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
-	COCOTB_DUT_WRAPPED=1 \
-	$(FUSESOC) --verbose run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
+_require_sdf:
+	@if [ ! -f "$(SDF)" ]; then \
+		echo "Error: SDF not found: $(SDF)"; \
+		echo "       available corners:"; \
+		ls -1 "$(dir $(patsubst %/,%,$(dir $(SDF))))" 2>/dev/null | sed 's/^/         /' || echo "         (none — run the PnR flow first)"; \
+		exit 1; \
+	fi
 
 # --------------------------------------------------
 # FuseSoc Setup & Clean
 # --------------------------------------------------
-setup:  ## Generate build files without running simulation/synthesis/... (e.g., make setup TARGET=rtl_sim CORE=cgra)
-	$(FUSESOC) run --setup --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
+setup:  ## Generate build files without running (e.g. make setup TARGET=post_pnr_sim)
+	$(FUSESOC) run --setup --build-root=$(BUILD_DIR) --target=$(TARGET) $(CORE_NAME) $(PARAM_FLAGS)
 
 format: ## Format the codebase
 	@FILES=$$(find src -name '*.vhd*' 2>/dev/null); \
@@ -82,40 +152,59 @@ format: ## Format the codebase
 		echo "No VHDL files found."; \
 	fi
 
-clean:  ## Clean up custom generated build directory
-	rm -rf $(BUILD_DIR)/
+# $(BUILD_DIR) holds two very different things: the FuseSoC simulation builds,
+# which are cheap to redo, and the LibreLane run directories, which are hours
+# of work and are what `make openroad` opens. They get separate targets so a
+# routine `make clean` cannot throw away a hardening run.
+SIM_BUILD_DIRS  = $(BUILD_DIR)/$(subst :,_,$(CORE_NAME)) $(BUILD_DIR)/sim_all_*.log
+IMPL_BUILD_DIRS = $(SYNTH_RUN_DIR) $(PNR_RUN_DIR) $(PNR_SIMPLE_RUN_DIR)
 
-clean-artifacts:  ## Clean up generated artifacts in src/misc/ and implementation/
-	rm -rf src/misc/$(CORE).fst src/misc/$(CORE).gtkw src/misc/$(CORE).surf.ron
-	rm -rf $(IMPL_DIR)/synth $(IMPL_DIR)/pnr $(IMPL_DIR)/pnr_simple
+clean:  ## Remove the simulation builds and the __pycache__ dirs (keeps the LibreLane runs)
+	rm -rf $(SIM_BUILD_DIRS)
+	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
 
-waves:
-	@if [ "$(WAVEFORM_VIEWER)" = "gtkwave" ]; then \
-		$(WAVEFORM_VIEWER) $(BUILD_DIR)/$(CORE).ghw src/misc/$(CORE).gtkw; \
-	elif [ "$(WAVEFORM_VIEWER)" = "surfer" ]; then \
-		$(WAVEFORM_VIEWER) -s src/misc/$(CORE).surf.ron $(BUILD_DIR)/$(CORE).fst; \
-	else \
-		surfer $(IP_DIR)/misc/$(CORE).fst; \
-	fi
+clean-impl:  ## Remove the LibreLane run directories (hours of work — be sure)
+	rm -rf $(IMPL_BUILD_DIRS)
 
-# ------------------------------------------------------------------------------
+clean-flow:  ## Remove the saved physical-implementation artifacts under flow/
+	rm -rf $(FLOW_DIR)/synth $(FLOW_DIR)/pnr $(FLOW_DIR)/pnr_simple
+
+clean-all: clean clean-impl clean-flow  ## All three of the above
+
+waves: ## Open a stage's trace (make waves TARGET=post_pnr_sim)
+	@wave=$(SIM_WORK_DIR)/aion.fst; \
+	if [ ! -f "$$wave" ]; then \
+		echo "Error: no trace at $$wave"; \
+		echo "       run the '$(TARGET)' target first, or pass TARGET=<fusesoc target>."; \
+		exit 1; \
+	fi; \
+	$(WAVEFORM_VIEWER) "$$wave"
+
+# ==============================================================================
 # Physical Implementation Flow (LibreLane via Docker)
 #
 #   make synth       RTL -> gate-level netlist + pre-PnR STA
 #   make pnr         netlist + AI-generated cells -> GDS
 #   make pnr_simple  RTL -> GDS, PDK standard cells only (the baseline)
 #
+# Each target works in $(BUILD_DIR)/<target>_$(CORE)/ and then copies the views,
+# metrics and reports of its latest run into flow/<target>/, which is the fixed
+# location flow/*.core points the simulation targets at.
+#
 # Pass LENIENT=1 to any of them to downgrade the hard checkers to warnings.
-# ------------------------------------------------------------------------------
-PROJECT_ROOT         ?= $(CURDIR)
+# ==============================================================================
 PDK                  ?= ihp-sg13g2
 PDK_ROOT             ?= /foss/pdks
 LENIENT              ?= 0
 
+# Inputs: hand-written, tracked.
 IMPL_DIR              = $(PROJECT_ROOT)/implementation
 LIBRELANE_CONFIG_SRC  = $(IMPL_DIR)/config.json
 LIBRELANE_SDC         = $(IMPL_DIR)/constraints/aion.sdc
 LIBRELANE_PIN_ORDER   = $(IMPL_DIR)/pin_order.cfg
+
+# Outputs: generated, git-ignored apart from the .core files.
+FLOW_DIR              = $(PROJECT_ROOT)/flow
 
 # Directory of AI-generated cell views (LEF/LIB/GDS/Verilog/SPICE), consumed by
 # `make pnr` only. Empty or absent means "PDK standard cells only".
@@ -123,7 +212,7 @@ CELLS_DIR            ?= $(IMPL_DIR)/cells
 
 # Netlist `make pnr` hardens. Defaults to whatever `make synth` last saved;
 # point it at the AI-rewritten netlist once the cell substitution has run.
-NETLIST              ?= $(IMPL_DIR)/synth/nl/$(TOPLEVEL).nl.v
+NETLIST              ?= $(FLOW_DIR)/synth/nl/$(TOPLEVEL).nl.v
 
 SYNTH_RUN_DIR        := $(BUILD_DIR)/synth_$(CORE)
 PNR_RUN_DIR          := $(BUILD_DIR)/pnr_$(CORE)
@@ -195,13 +284,13 @@ define librelane_finish
 	exit $$status
 endef
 
-synth: ## Synthesis + pre-PnR STA -> implementation/synth/
+synth: ## Synthesis + pre-PnR STA -> flow/synth/
 	$(call librelane_prepare,$(SYNTH_RUN_DIR),synth,$(LENIENT_FLAG))
 	$(call librelane_run,$(SYNTH_RUN_DIR),)
-	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(SYNTH_RUN_DIR) OUT_DIR=$(IMPL_DIR)/synth
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(SYNTH_RUN_DIR) OUT_DIR=$(FLOW_DIR)/synth
 	$(call librelane_finish,$(SYNTH_RUN_DIR))
 
-pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=)
+pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) -> flow/pnr/
 	@$(PYTHON) $(PROJECT_ROOT)/scripts/collect_cells.py $(CELLS_DIR) $(LENIENT_FLAG)
 	@if [ ! -f "$(NETLIST)" ]; then \
 		echo "Error: netlist not found: $(NETLIST)"; \
@@ -212,13 +301,13 @@ pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=)
 	@cp -v $(NETLIST) $(PNR_RUN_DIR)/nl/$(TOPLEVEL).nl.v
 	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,--pin-order $(LIBRELANE_PIN_ORDER) --cells-dir $(CELLS_DIR) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_RUN_DIR),--from Checker.NetlistAssignStatements -e nl=nl/$(TOPLEVEL).nl.v)
-	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(IMPL_DIR)/pnr
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(FLOW_DIR)/pnr
 	$(call librelane_finish,$(PNR_RUN_DIR))
 
-pnr_simple: ## Full RTL -> GDS flow with the PDK standard cells only
+pnr_simple: ## Full RTL -> GDS flow with the PDK standard cells only -> flow/pnr_simple/
 	$(call librelane_prepare,$(PNR_SIMPLE_RUN_DIR),pnr_simple,--pin-order $(LIBRELANE_PIN_ORDER) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_SIMPLE_RUN_DIR),)
-	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_SIMPLE_RUN_DIR) OUT_DIR=$(IMPL_DIR)/pnr_simple
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_SIMPLE_RUN_DIR) OUT_DIR=$(FLOW_DIR)/pnr_simple
 	$(call librelane_finish,$(PNR_SIMPLE_RUN_DIR))
 
 librelane: pnr_simple ## Alias for pnr_simple
@@ -239,9 +328,6 @@ klayout: ## Open the last run in KLayout (VIEW_RUN_DIR=)
 		--last-run \
 		--flow OpenInKLayout
 
-librelane-openroad: openroad
-librelane-klayout: klayout
-
 # ------------------------------------------------------------------------------
 # Utils targets
 # ------------------------------------------------------------------------------
@@ -253,8 +339,8 @@ _save_run:
 		exit 1; \
 	fi; \
 	case "$(OUT_DIR)" in \
-		$(IMPL_DIR)/?*) ;; \
-		*) echo "Error: refusing to clean OUT_DIR='$(OUT_DIR)' outside $(IMPL_DIR)/"; exit 1 ;; \
+		$(FLOW_DIR)/?*) ;; \
+		*) echo "Error: refusing to clean OUT_DIR='$(OUT_DIR)' outside $(FLOW_DIR)/"; exit 1 ;; \
 	esac; \
 	echo "Saving artifacts from $$run to $(OUT_DIR)/"; \
 	rm -rf $(OUT_DIR); \
@@ -273,208 +359,11 @@ _save_run:
 # ------------------------------------------------------------------------------
 # Cocotb Variable Export Routine
 # ------------------------------------------------------------------------------
+# COCOTB_TEST_MODULES and PYGPI_PYTHON_BIN are set by the Edalize `sim` flow
+# from `cocotb_module` in aion.core, so they are deliberately not set here.
+# COCOTB_TOPLEVEL is: the Icarus runs elaborate two or three root modules and
+# cocotb has to be told which one is the DUT.
 _setup_cocotb_env:
-	$(eval export COCOTB_ANSI_OUTPUT     := 1)
-	$(eval export PYGPI_PYTHON_BIN       := $(shell cocotb-config --python-bin))
-	$(eval export COCOTB_TOPLEVEL        := $(TOPLEVEL))
-	$(eval export COCOTB_TEST_MODULES    := $(SIM_MODULE))
-	$(eval export PYTHONPATH             := $(shell realpath $(TEST_DIRS)):$(PYTHONPATH))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# # Internal helpers for joining lists
-# comma := ,
-# space := $(subst ,, )
-#
-# PROJECT_ROOT  = $(shell pwd)
-# IP_DIR        = $(PROJECT_ROOT)/src/modules/$(CORE)
-# # IP_DIR        = $(PROJECT_ROOT)/src
-#
-# FUSESOC_BUILD_DIR  = $(strip $(shell find $(BUILD_DIR) -type d -name "aion_$(CORE)_*" 2>/dev/null | sort | head -n 1))
-#
-# # ------------------------------------------------------------------------------
-# # LibreLane / Physical Implementation
-# # ------------------------------------------------------------------------------
-# PDK                  ?= ihp-sg13g2
-# PDK_ROOT             ?= /foss/pdks
-# LIBRELANE_RUN_DIR    := $(BUILD_DIR)/librelane_$(CORE)
-# SYNTH_RUN_DIR        := $(BUILD_DIR)/synth_$(CORE)
-# FLOW_FINAL_DIR        = $(LIBRELANE_RUN_DIR)/final
-# LIBRELANE_CONFIG_SRC  = $(IP_DIR)/implementation/config.json
-# LIBRELANE_CONFIG      = $(LIBRELANE_RUN_DIR)/config.json
-# SYNTH_CONFIG          = $(SYNTH_RUN_DIR)/config.json
-# LIBRELANE_PIN_ORDER   = $(IP_DIR)/implementation/pin_order.cfg
-#
-# # ------------------------------------------------------------------------------
-# # Dynamic Environment & Conda Path Fixes
-# # ------------------------------------------------------------------------------
-# ifdef CONDA_PREFIX
-# 	export LD_LIBRARY_PATH := $(CONDA_PREFIX)/lib:$(LD_LIBRARY_PATH)
-# 	export LD_PRELOAD      := $(CONDA_PREFIX)/lib/libpython3.12.so.1.0
-# endif
-#
-# # ------------------------------------------------------------------------------
-# # Tools
-# # ------------------------------------------------------------------------------
-# FUSESOC         := $(shell which fusesoc)
-# PYTHON          := $(shell which python)
-# VERIBLE_FORMAT  := $(shell which verible-verilog-format)
-#
-# # ------------------------------------------------------------------------------
-# # Targets
-# # ------------------------------------------------------------------------------
-# .PHONY: all sim sim_verilator sim_all setup setup_impl librelane synth save_synth format clean waves _setup_cocotb_env
-#
-# all: sim
-#
-# sim: TARGET := rtl_sim
-# sim: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=cgra TOOL=verilator) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
-# 	COCOTB_DUT_WRAPPED=0 \
-# 	$(FUSESOC) run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
-#
-# sim_verilator: TARGET := rtl_sim_verilator
-# sim_verilator: TOOL := verilator
-# sim_verilator: TOPLEVEL := top
-# sim_verilator: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=cgra TOOL=verilator) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
-# 	COCOTB_DUT_WRAPPED=1 \
-# 	$(FUSESOC) run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
-#
-# post_synth_sim: TARGET := post_synth_sim
-# post_synth_sim: _setup_cocotb_env ## Run simulation (e.g., make sim CORE=cgra TOOL=verilator) -> Default: TOOL=modelsim TARGET=rtl_sim CORE=systolic_array
-# 	COCOTB_DUT_WRAPPED=1 \
-# 	$(FUSESOC) --verbose run --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
-#
-# sim_all: ## Run both icarus and verilator simulations and print a colored summary
-# 	@$(PYTHON) $(PROJECT_ROOT)/utils/sim_all.py
-#
-# # ------------------------------------------------------------------------------
-# # Physical Implementation Flow (LibreLane via Docker)
-# # ------------------------------------------------------------------------------
-# define librelane_prepare
-# 	@mkdir -p $(1)/rtl $(2)
-# 	@$(eval _RTL_FILES := $(shell $(PYTHON) $(PROJECT_ROOT)/utils/extract_fusesoc_sources.py \
-# 		--core $(CORE_NAME) \
-# 		--target librelane \
-# 		--config $(PROJECT_ROOT)/fusesoc.conf \
-# 		--build-root $(BUILD_DIR) \
-# 		--format list))
-# 	@for src in $(_RTL_FILES); do \
-# 		dst="$(1)/rtl/$$(basename $$src)"; \
-# 		if [ ! -e "$$dst" ] || [ "$$src" -nt "$$dst" ]; then \
-# 			cp -v "$$src" "$$dst"; \
-# 		fi; \
-# 	done
-# 	@$(PYTHON) $(PROJECT_ROOT)/utils/prepare_librelane_config.py \
-# 		--src-config $(LIBRELANE_CONFIG_SRC) \
-# 		--dst-config $(3) \
-# 		--ip-dir $(IP_DIR) \
-# 		--pin-order $(LIBRELANE_PIN_ORDER) \
-# 		--verilog-files "$(subst $(space),$(comma),$(_RTL_FILES))" \
-# 		$(4)
-# endef
-#
-# librelane: ## Run LibreLane physical implementation flow inside $(BUILD_DIR)
-# 	$(call librelane_prepare,$(LIBRELANE_RUN_DIR),$(FLOW_FINAL_DIR),$(LIBRELANE_CONFIG),)
-# 	@cd $(LIBRELANE_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/run.sh librelane config.json \
-# 		--pdk $(PDK) \
-# 		--pdk-root $(PDK_ROOT) \
-# 		--manual-pdk \
-# 		--save-views-to ./final/
-#
-# # Latest LibreLane synthesis run directory (timestamped).
-# SYNTH_LATEST_RUN := $(lastword $(sort $(wildcard $(SYNTH_RUN_DIR)/runs/RUN_*)))
-#
-# synth: ## Run LibreLane synthesis only inside $(BUILD_DIR)/synth_$(CORE)
-# 	$(call librelane_prepare,$(SYNTH_RUN_DIR),$(SYNTH_RUN_DIR)/final,$(SYNTH_CONFIG),--synth-only)
-# 	@cd $(SYNTH_RUN_DIR) && HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/run.sh librelane config.json \
-# 		--pdk $(PDK) \
-# 		--pdk-root $(PDK_ROOT) \
-# 		--manual-pdk \
-# 		--save-views-to ./final/
-# 	@$(MAKE) _save_synth
-#
-# waves:
-# 	@if [ "$(WAVEFORM_VIEWER)" = "gtkwave" ]; then \
-# 		$(WAVEFORM_VIEWER) $(IP_DIR)/misc/$(CORE).fst $(IP_DIR)/misc/$(CORE).gtkw; \
-# 	elif [ "$(WAVEFORM_VIEWER)" = "surfer" ]; then \
-# 		$(WAVEFORM_VIEWER) -s $(IP_DIR)/misc/$(CORE).surf.ron $(IP_DIR)/misc/$(CORE).fst; \
-# 	else \
-# 		surfer $(IP_DIR)/misc/$(CORE).fst; \
-# 	fi
-#
-# # ------------------------------------------------------------------------------
-# # IP-Specific Configuration Auto-Loading
-# # ------------------------------------------------------------------------------
-# # We look for an optional 'config.mk' inside the active IP directory to auto-load
-# # IP-specific parameters like TOPLEVEL, SIM_MODULE, or custom PARAM_FLAGS.
-# -include $(IP_DIR)/config.mk
-#
-# # Fallback defaults if the IP doesn't provide a config.mk :(
-# TOPLEVEL     ?= $(CORE)
-# SIM_MODULE   ?= $(CORE)_test
-# TEST_DIRS    ?= $(IP_DIR)/tb/
-#
-# # --------------------------------------------------
-# # FuseSoc Setup & Clean
-# # --------------------------------------------------
-# setup:  ## Generate build files without running simulation/synthesis/... (e.g., make setup TARGET=rtl_sim CORE=cgra)
-# 	$(FUSESOC) run --setup --build-root=$(BUILD_DIR) --target=$(TARGET) --tool=$(TOOL) $(CORE_NAME) $(PARAM_FLAGS)
-#
-# format: ## Format the codebase
-# 	@FILES=$$(find src -name '*.sv*' 2>/dev/null); \
-# 	if [ -n "$$FILES" ]; then \
-# 		echo "Formatting files:"; \
-# 		for f in $$FILES; do echo "  -> $$f"; done; \
-# 		echo "$$FILES" | xargs $(VERIBLE_FORMAT) --flagfile=.verible-verilog-format --inplace; \
-# 	else \
-# 		echo "No SystemVerilog files found."; \
-# 	fi
-#
-# clean:  ## Clean up custom generated build directory
-# 	rm -rf $(BUILD_DIR)/
-#
-# # ------------------------------------------------------------------------------
-# # Utils targets
-# # ------------------------------------------------------------------------------
-# _save_synth:
-# 	@if [ -z "$(SYNTH_LATEST_RUN)" ]; then \
-# 		echo "Error: no synthesis run found in $(SYNTH_RUN_DIR)/runs/"; \
-# 		exit 1; \
-# 	fi
-# 	@mkdir -p $(IP_DIR)/implementation/synth/reports
-# 	@echo "Copying synthesis artifacts from $(SYNTH_LATEST_RUN) to $(IP_DIR)/implementation/synth/"
-# 	@cp -v $(SYNTH_LATEST_RUN)/final/nl/$(CORE).nl.v $(IP_DIR)/implementation/synth/
-# 	@cp -v $(SYNTH_LATEST_RUN)/final/json_h/$(CORE).h.json $(IP_DIR)/implementation/synth/
-# 	@cp -v $(SYNTH_LATEST_RUN)/final/metrics.csv $(IP_DIR)/implementation/synth/
-# 	@cp -v $(SYNTH_LATEST_RUN)/final/metrics.json $(IP_DIR)/implementation/synth/
-# 	@cp -v $(SYNTH_LATEST_RUN)/flow.log $(IP_DIR)/implementation/synth/
-# 	@cp -v $(SYNTH_LATEST_RUN)/6-yosys-synthesis/reports/stat.rpt $(IP_DIR)/implementation/synth/reports/
-# 	@cp -v $(SYNTH_LATEST_RUN)/6-yosys-synthesis/reports/latch.rpt $(IP_DIR)/implementation/synth/reports/
-# 	@cp -v $(SYNTH_LATEST_RUN)/6-yosys-synthesis/reports/chk.rpt $(IP_DIR)/implementation/synth/reports/
-# 	@cp -v $(SYNTH_LATEST_RUN)/6-yosys-synthesis/reports/pre_synth_chk.rpt $(IP_DIR)/implementation/synth/reports/
-# 	@cp -v $(SYNTH_LATEST_RUN)/6-yosys-synthesis/reports/post_dff.rpt $(IP_DIR)/implementation/synth/reports/
-# 	@echo "Synthesis artifacts saved to $(IP_DIR)/implementation/synth/"
-#
-# # ------------------------------------------------------------------------------
-# # Cocotb Variable Export Routine
-# # ------------------------------------------------------------------------------
-# _setup_cocotb_env:
-# 	$(eval export COCOTB_ANSI_OUTPUT     := 1)
-# 	$(eval export PYGPI_PYTHON_BIN       := $(shell cocotb-config --python-bin))
-# 	$(eval export COCOTB_TOPLEVEL        := $(TOPLEVEL))
-# 	$(eval export COCOTB_TEST_MODULES    := $(SIM_MODULE))
-# 	$(eval export PYTHONPATH             := $(shell realpath $(TEST_DIRS)):$(PYTHONPATH))
+	$(eval export COCOTB_ANSI_OUTPUT := 1)
+	$(eval export COCOTB_TOPLEVEL    := $(TOPLEVEL))
+	$(eval export PYTHONPATH         := $(shell realpath $(TEST_DIRS)):$(PYTHONPATH))

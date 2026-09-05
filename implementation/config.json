@@ -8,7 +8,14 @@
     "the result to <run dir>/config.json. The '//' and '_modes' keys are stripped",
     "on the way out.",
     "",
-    "Targets:  make synth | make pnr | make pnr_simple"
+    "Targets:  make synth | make pnr | make pnr_simple",
+    "",
+    "The *_VIOLATION_CORNERS lists are pinned rather than left to their",
+    "defaults. Setup and hold already covered every corner (setup via the",
+    "TIMING_VIOLATION_CORNERS fallback, hold via its own default), but max",
+    "slew and max cap default to [\"\"], which LibreLane filters down to an",
+    "empty corner list -- so those two checkers examined nothing and still",
+    "reported 'No ... violations found'. The 'lenient' overlay empties all five."
   ],
 
   "meta": {
@@ -32,7 +39,13 @@
   "CLOCK_PORT": "clk",
   "CLOCK_PERIOD": 20,
 
-  "SYNTH_STRATEGY": "DELAY 4",
+  "TIMING_VIOLATION_CORNERS": ["*"],
+  "SETUP_VIOLATION_CORNERS": ["*"],
+  "HOLD_VIOLATION_CORNERS": ["*"],
+  "MAX_SLEW_VIOLATION_CORNERS": ["*"],
+  "MAX_CAP_VIOLATION_CORNERS": ["*"],
+
+  "SYNTH_STRATEGY": "AREA 0",
   "SYNTH_ABC_BUFFERING": false,
   "SYNTH_SHARE_RESOURCES": true,
   "SYNTH_TIE_UNDEFINED": "low",

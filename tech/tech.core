@@ -4,17 +4,17 @@ CAPI=2:
 #  Project:     AION
 #  Author:      Filippo Quadri <filippo.quadri@epfl.ch>
 #  Created:     2026-08-13
-#  Description: Tech - FuseSoC Core File
+#  Description: IHP SG13G2 standard cells - zero-delay simulation models
 # ================================================================
 
 name: epfl:aion:tech:1.0.0
-description: Tech Wrapper
+description: SG13G2 standard cell models without timing (Verilator-safe)
 
 filesets:
   rtl:
     files:
-      - rtl/sg13g2_stdcell.v
-      - rtl/sg13g2_udp.v
+      - rtl/sg13g2_udp_nodelay.v
+      - rtl/sg13g2_stdcell_nodelay.v
     file_type: verilogSource
 
 targets:

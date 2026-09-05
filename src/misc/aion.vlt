@@ -1,8 +1,0 @@
-// Copyright 2026 Filippo Quadri
-// Solderpad Hardware License, Version 2.1, see LICENSE.md for details.
-// SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
-
-`verilator_config
-
-// DCO model uses #0 delays and real types; waive related Verilator warnings.
-lint_off -rule DECLFILENAME -file "*/spm.v"

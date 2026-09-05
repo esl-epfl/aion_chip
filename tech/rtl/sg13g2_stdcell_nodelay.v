@@ -12,6 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// ---------------------------------------------------------------------
+// Zero-delay cell models (derived from the IHP PDK models).
+//
+// Same functions as tech/rtl/sg13g2_stdcell.v, with the `specify` blocks
+// removed and the `delayed_*` wires -- which those blocks would otherwise
+// drive -- tied straight to the ports they shadow. This is the model set
+// used whenever timing is irrelevant or unsupported:
+//
+//   * Verilator, which ignores `specify` and `$sdf_annotate` outright, so
+//     the unpatched models leave every flop with a constant clock.
+//   * post-synthesis simulation, which is a pure function check.
+//
+// For a timing-annotated post-PnR run use tech/rtl/sg13g2_stdcell.v with
+// the SDF instead (Icarus only) -- see tech/tech_timing.core.
+// ---------------------------------------------------------------------
+
 // type: a21o 
 `timescale 1ns / 10ps
 `celldefine
@@ -539,7 +555,10 @@ module sg13g2_dfrbp_1 (
   input CLK, D, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_IQ, int_fwire_IQN, int_fwire_r;
   wire xcr_0;
@@ -577,7 +596,10 @@ module sg13g2_dfrbp_2 (
   input CLK, D, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_IQ, int_fwire_IQN, int_fwire_r;
   wire xcr_0;
@@ -614,7 +636,10 @@ module sg13g2_dfrbpq_1 (
   input CLK, D, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_IQ, int_fwire_r, xcr_0;
 
@@ -648,7 +673,10 @@ module sg13g2_dfrbpq_2 (
   input CLK, D, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_IQ, int_fwire_r, xcr_0;
 
@@ -681,7 +709,9 @@ module sg13g2_dlhq_1 (
   input D, GATE;
   reg notifier;
   wire delayed_D, delayed_GATE;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_GATE = GATE;
   // Function
 
   wire int_fwire_IQ;
@@ -715,7 +745,10 @@ module sg13g2_dlhr_1 (
   input D, GATE, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_GATE;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_GATE = GATE;
   // Function
 
   wire int_fwire_IQ, int_fwire_IQN, int_fwire_r;
@@ -752,7 +785,10 @@ module sg13g2_dlhrq_1 (
   input D, GATE, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_GATE;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_GATE = GATE;
   // Function
 
   wire int_fwire_IQ, int_fwire_r;
@@ -788,7 +824,10 @@ module sg13g2_dllr_1 (
   input D, GATE_N, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_GATE_N;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_GATE_N = GATE_N;
   // Function
 
   wire int_fwire_clk, int_fwire_IQ, int_fwire_IQN;
@@ -827,7 +866,10 @@ module sg13g2_dllrq_1 (
   input D, GATE_N, RESET_B;
   reg notifier;
   wire delayed_D, delayed_RESET_B, delayed_GATE_N;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_GATE_N = GATE_N;
   // Function
 
   wire int_fwire_clk, int_fwire_IQ, int_fwire_r;
@@ -1278,7 +1320,9 @@ module sg13g2_lgcp_1 (
   input CLK, GATE;
   reg notifier;
   wire delayed_GATE, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_GATE = GATE;
+  assign delayed_CLK = CLK;
   // Function
 
   wire int_fwire_clk, int_fwire_int_GATE;
@@ -2056,7 +2100,13 @@ module sg13g2_sdfbbp_1 (
   input CLK, D, RESET_B, SCD, SCE, SET_B;
   reg notifier;
   wire delayed_D, delayed_SCD, delayed_SCE, delayed_RESET_B, delayed_SET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_SCD = SCD;
+  assign delayed_SCE = SCE;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_SET_B = SET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_d, int_fwire_IQ, int_fwire_IQN;
   wire int_fwire_r, int_fwire_s, xcr_0;
@@ -2101,7 +2151,12 @@ module sg13g2_sdfrbp_1 (
   input CLK, D, RESET_B, SCD, SCE;
   reg notifier;
   wire delayed_D, delayed_SCD, delayed_SCE, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_SCD = SCD;
+  assign delayed_SCE = SCE;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_d, int_fwire_IQ, int_fwire_IQN;
   wire int_fwire_r, xcr_0;
@@ -2145,7 +2200,12 @@ module sg13g2_sdfrbp_2 (
   input CLK, D, RESET_B, SCD, SCE;
   reg notifier;
   wire delayed_D, delayed_SCD, delayed_SCE, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_SCD = SCD;
+  assign delayed_SCE = SCE;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_d, int_fwire_IQ, int_fwire_IQN;
   wire int_fwire_r, xcr_0;
@@ -2188,7 +2248,12 @@ module sg13g2_sdfrbpq_1 (
   input CLK, D, RESET_B, SCD, SCE;
   reg notifier;
   wire delayed_D, delayed_SCD, delayed_SCE, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_SCD = SCD;
+  assign delayed_SCE = SCE;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_d, int_fwire_IQ, int_fwire_r;
   wire xcr_0;
@@ -2229,7 +2294,12 @@ module sg13g2_sdfrbpq_2 (
   input CLK, D, RESET_B, SCD, SCE;
   reg notifier;
   wire delayed_D, delayed_SCD, delayed_SCE, delayed_RESET_B, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_D = D;
+  assign delayed_SCD = SCD;
+  assign delayed_SCE = SCE;
+  assign delayed_RESET_B = RESET_B;
+  assign delayed_CLK = CLK;
   // Function
   wire int_fwire_d, int_fwire_IQ, int_fwire_r;
   wire xcr_0;
@@ -2268,7 +2338,10 @@ module sg13g2_slgcp_1 (
   input GATE, CLK, SCE;
   reg notifier;
   wire delayed_GATE, delayed_SCE, delayed_CLK;
-
+  // delayed_* are specify-block outputs upstream; tie them through.
+  assign delayed_GATE = GATE;
+  assign delayed_SCE = SCE;
+  assign delayed_CLK = CLK;
   // Function
 
   wire int_fwire_clk, int_fwire_int_GATE, int_fwire_test;

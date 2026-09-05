@@ -1,0 +1,28 @@
+CAPI=2:
+
+# ================================================================
+#  Project:     AION
+#  Author:      Filippo Quadri <filippo.quadri@epfl.ch>
+#  Created:     2026-09-04
+#  Description: Fixed handle on the artifacts of `make synth`
+# ================================================================
+
+name: epfl:aion:flow_synth:1.0.0
+description: |
+  output of `make synth`: gate-level netlist and pre-PnR STA reports
+
+  The directory it points at is wiped and rewritten by every `make synth`, so
+  this core is the stable name the simulation targets in aion.core depend on.
+  The files below do not exist until that target has run at least once.
+
+filesets:
+  netlist:
+    files:
+      - synth/nl/tt_um_aion.nl.v
+    file_type: verilogSource
+
+targets:
+  default: &default
+    filesets:
+      - netlist
+    toplevel: tt_um_aion

@@ -4,21 +4,26 @@ env.sh
 # pycache & venv
 __pycache__/
 
-# build directory
+# fusesoc build directory
 .build/
-logs/
-implementation/synth/
+
+# physical-implementation outputs. flow/*.core and flow/README.md are tracked;
+# everything the LibreLane targets write under flow/ is not.
+flow/synth/
+flow/pnr/
+flow/pnr_simple/
 
 # nvim/vscode stuff
 .nvim/
 .vscode/
+
+# simulation waves
+*.vcd
+*.fst
+*.ghw
 
 # compiled object files
 *.slo
 *.lo
 *.o
 *.obj
-*.vcd
-*.fst
-implementation/pnr/
-implementation/pnr_simple/

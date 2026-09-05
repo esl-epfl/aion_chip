@@ -1,0 +1,28 @@
+CAPI=2:
+
+# ================================================================
+#  Project:     AION
+#  Author:      Filippo Quadri <filippo.quadri@epfl.ch>
+#  Created:     2026-09-04
+#  Description: Fixed handle on the artifacts of `make pnr_simple`
+# ================================================================
+
+name: epfl:aion:flow_pnr_simple:1.0.0
+description: |
+  output of `make pnr_simple`: full RTL-to-GDS with the PDK standard cells only
+
+  The directory it points at is wiped and rewritten by every `make pnr_simple`, so
+  this core is the stable name the simulation targets in aion.core depend on.
+  The files below do not exist until that target has run at least once.
+
+filesets:
+  netlist:
+    files:
+      - pnr_simple/nl/tt_um_aion.nl.v
+    file_type: verilogSource
+
+targets:
+  default: &default
+    filesets:
+      - netlist
+    toplevel: tt_um_aion

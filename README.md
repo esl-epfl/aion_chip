@@ -11,6 +11,61 @@
 
 ---
 
+## Repository layout
+
+```
+src/rtl/            VHDL sources
+src/tb/             cocotb testbenches
+src/misc/           dump_waves.v, sdf_annotate.v — extra roots for the Icarus runs
+tech/               IHP SG13G2 cell views and their simulation models
+implementation/     LibreLane inputs: config template, SDC, pin order, AI cells
+flow/               LibreLane outputs, one directory per target  (git-ignored)
+scripts/            flow helpers driven by the Makefile
+```
+
+## Flow
+
+`make help` lists everything. The two halves:
+
+### Simulation
+
+| Target                             | Simulator          | Netlist              | Delays |
+| ---------------------------------- | ------------------ | -------------------- | ------ |
+| `make sim`                         | GHDL               | VHDL RTL             | —      |
+| `make post_synth_sim`              | Verilator          | `flow/synth`         | —      |
+| `make post_synth_sim TOOL=icarus`  | Icarus             | `flow/synth`         | —      |
+| `make post_pnr_sim`                | Icarus             | `flow/pnr_simple`    | SDF    |
+| `make post_pnr_sim TOOL=verilator` | Verilator          | `flow/pnr_simple`    | —      |
+| `make post_pnr_sim_ai`             | Icarus             | `flow/pnr`           | SDF    |
+| `make sim_all`                     | all of the above, as a summary table       |        |
+
+GHDL is the only simulator that reads the VHDL, so RTL simulation has exactly
+one backend; Verilator and Icarus only ever see gate-level Verilog.
+
+Only the post-PnR Icarus run has delays. Verilator ignores `$sdf_annotate`
+entirely, so its post-PnR run re-checks function and nothing else. Pick the
+corner with `SDF_CORNER=` — `nom_slow_1p08V_125C` (default),
+`nom_typ_1p20V_25C`, `nom_fast_1p32V_m40C`. Icarus applies the SDF's cell and
+interconnect delays but not its `TIMINGCHECK` records, so setup and hold remain
+STA's business, not the simulation's: a violation will not fail this run in any
+corner, it will latch a clean but wrong value in silence. Read the slacks off
+`flow/pnr_simple/reports/*-openroad-stapostpnr/` instead — and `make pnr_simple`
+itself fails on a setup or hold violation in any corner.
+
+### Physical implementation
+
+| Target            | In                        | Out                 |
+| ----------------- | ------------------------- | ------------------- |
+| `make synth`      | VHDL via FuseSoC          | `flow/synth/`       |
+| `make pnr`        | `NETLIST=` + `CELLS_DIR=` | `flow/pnr/`         |
+| `make pnr_simple` | VHDL via FuseSoC          | `flow/pnr_simple/`  |
+
+`LENIENT=1` downgrades the hard checkers to warnings. `make openroad` and
+`make klayout` open the last run in a GUI. See `implementation/README.md` and
+`flow/README.md`.
+
+---
+
 ## Technical Overview
 
 ### Quick Facts

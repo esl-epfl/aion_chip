@@ -1,24 +1,26 @@
 # Physical implementation
 
-Everything LibreLane needs, plus whatever the last run produced.
+Everything LibreLane needs. Hand-written and tracked; the outputs of a run go
+to `../flow/` instead, one directory per target — see `../flow/README.md`.
 
 ```
 config.json              flow configuration template (see below)
 constraints/aion.sdc     timing constraints, used for PnR and signoff STA
 pin_order.cfg            pin placement, consumed by Odb.CustomIOPlacement
 cells/                   AI-generated standard cells (see cells/README.md)
-synth/                   output of `make synth`       (git-ignored)
-pnr/                     output of `make pnr`         (git-ignored)
-pnr_simple/              output of `make pnr_simple`  (git-ignored)
 ```
 
 ## Targets
 
-| Target            | In                                  | Out                    |
-| ----------------- | ----------------------------------- | ---------------------- |
-| `make synth`      | VHDL via FuseSoC                    | netlist + pre-PnR STA  |
-| `make pnr`        | `NETLIST=` + `CELLS_DIR=`           | GDS                    |
-| `make pnr_simple` | VHDL via FuseSoC                    | GDS, PDK cells only    |
+| Target            | In                                  | Out                                  |
+| ----------------- | ----------------------------------- | ------------------------------------ |
+| `make synth`      | VHDL via FuseSoC                    | `flow/synth/` — netlist + pre-PnR STA |
+| `make pnr`        | `NETLIST=` + `CELLS_DIR=`           | `flow/pnr/` — GDS                     |
+| `make pnr_simple` | VHDL via FuseSoC                    | `flow/pnr_simple/` — GDS, PDK cells only |
+
+Each of these hardens in `.build/<target>_aion/` and then copies the last run's
+views, metrics and reports into `flow/<target>/`, which is the fixed path the
+gate-level simulation targets read.
 
 `make pnr` skips synthesis: it hands LibreLane the netlist as the flow's initial
 state (`--from Checker.NetlistAssignStatements -e nl=…`) and runs the rest of
