@@ -1,0 +1,3 @@
+[submodule "aion_flow"]
+	path = aion_flow
+	url = git@github.com:esl-epfl/aion_flow.git
