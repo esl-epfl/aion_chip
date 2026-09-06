@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from . import paths
-from .style import Style, color, info, note
+from .style import Style, color, emit, info, note
 
 
 class StepFailed(RuntimeError):
@@ -73,6 +73,48 @@ class Result:
             if line.startswith(prefix):
                 return line.strip()
         return None
+
+
+# Every child this process has started, so one Ctrl-C can take the whole
+# tree down. start_new_session=True below puts each child in its own process
+# group -- which is what lets a timeout kill a whole `make -> docker -> magic`
+# chain rather than only the direct child, but it also means the terminal's
+# SIGINT never reaches them. Without this registry an interrupted run leaves
+# container steps writing into the directory the flow just gave up on, and,
+# in step 6, drawing agents still talking to the API.
+_CHILDREN: set = set()
+_CHILDREN_LOCK = threading.Lock()
+_CANCELLED = threading.Event()
+
+
+def register(process) -> None:
+    """Track a child so terminate_all() can reach it."""
+    with _CHILDREN_LOCK:
+        _CHILDREN.add(process)
+
+
+def unregister(process) -> None:
+    with _CHILDREN_LOCK:
+        _CHILDREN.discard(process)
+
+
+def cancelled() -> bool:
+    """True once terminate_all() ran: no further command may start."""
+    return _CANCELLED.is_set()
+
+
+def terminate_all() -> int:
+    """Kill every running child and stop any new one from starting.
+
+    Returns how many were still running, which is the only honest thing to
+    print after a Ctrl-C with several cells in flight.
+    """
+    _CANCELLED.set()
+    with _CHILDREN_LOCK:
+        running = list(_CHILDREN)
+    for process in running:
+        terminate(process)
+    return len(running)
 
 
 # Noise every container run prints before the real output.
@@ -147,9 +189,14 @@ class Runner:
     def _run(self, argv: Sequence[str], *, cwd: Path, name: str,
              env: Optional[dict] = None, strip_noise: bool = False) -> Result:
         pretty = " ".join(shlex.quote(a) for a in argv)
+        if cancelled():
+            # Step 6 runs cells in parallel, so a Ctrl-C lands while other
+            # threads are between commands. Starting the next one anyway is
+            # how an interrupted run keeps going for another ten minutes.
+            raise StepFailed(f"{name}: not started, the run was interrupted", 130)
         self.commands.append({"name": name, "cwd": str(cwd), "argv": list(argv)})
 
-        print(color("  ▶ ", Style.DIM) + color(pretty, Style.WHITE))
+        emit(color("  ▶ ", Style.DIM) + color(pretty, Style.WHITE))
         if cwd != paths.PROJECT_ROOT:
             note(f"cwd {paths.rel_to_project(cwd)}")
 
@@ -181,6 +228,7 @@ class Runner:
                 text=True, errors="replace", bufsize=1,
                 start_new_session=True,
             )
+            register(process)
 
             # A watchdog, not process.wait(timeout=): the read loop below
             # blocks until stdout reaches EOF, which is exactly what a hung
@@ -188,7 +236,7 @@ class Runner:
             # fire. This one can.
             def _expire() -> None:
                 timed_out.set()
-                _terminate(process)
+                terminate(process)
 
             watchdog = threading.Timer(self.timeout, _expire)
             watchdog.daemon = True
@@ -202,10 +250,16 @@ class Runner:
                     if strip_noise and _is_noise(line):
                         continue
                     if not self.quiet:
-                        print("    " + line.rstrip("\n"))
+                        emit("    " + line.rstrip("\n"))
                 returncode = process.wait()
+            except KeyboardInterrupt:
+                # The child is in its own session, so it never saw the
+                # SIGINT the terminal sent us.
+                terminate(process)
+                raise
             finally:
                 watchdog.cancel()
+                unregister(process)
             if timed_out.is_set():
                 returncode = 124
                 chunks.append(f"\n[flow] timed out after {self.timeout}s\n")
@@ -242,7 +296,7 @@ def _quote_assignment(text: str) -> str:
     return f"{name}={shlex.quote(value)}" if value else text
 
 
-def _terminate(process) -> None:
+def terminate(process) -> None:
     """Stop a command and everything it started.
 
     The direct child is usually `make` or docker_run.sh; the work is in its

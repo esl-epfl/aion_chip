@@ -221,6 +221,7 @@ clean-flow:  ## Remove every flow step's output under flow/ (keeps the .core fil
 	@rm -rf $(FLOW_DIR)/synth $(FLOW_DIR)/pnr
 
 clean-all: clean clean-impl clean-flow  ## All three of the above
+	rm -rf $(BUILD_DIR)
 
 waves: ## Open a stage's trace (make waves TARGET=post_pnr_sim)
 	@wave=$(SIM_WORK_DIR)/aion.fst; \
@@ -401,6 +402,7 @@ klayout: ## Open the last run in KLayout (VIEW_RUN_DIR=)
 #   make flow                    every step
 #   make flow STEP=3             one step  (also 'STEP=2..5')
 #   make flow STEP=6 FLOW_ARGS=--draw=auto
+#   make flow STEP=6 FLOW_ARGS="--draw=auto -j 3"   three cells at a time
 #   make flow-status             the coherence table
 #
 # ./flow.py is the same thing with a nicer command line.

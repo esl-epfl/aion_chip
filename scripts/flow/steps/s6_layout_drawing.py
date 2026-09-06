@@ -19,6 +19,12 @@
 #                                Re-run the step once you have drawn it.
 #    DRAW_MODE=auto              drive `claude -p` with the aion-layout skill
 #                                until `RESULT: PASS` or DRAW_MAX_ITERS.
+#
+#  DRAW_JOBS cells are worked on at once, each in its own thread with its own
+#  build directory, generator and agent session; every line they print is
+#  tagged with the cell it came from.  The agent turns themselves are
+#  narrated as they run (DRAW_STREAM) -- one turn is half an hour of DRC and
+#  LVS, and a silent half hour is indistinguishable from a hung flow.
 # ================================================================
 
 from __future__ import annotations
@@ -26,17 +32,26 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import subprocess
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .. import paths
+from .. import agent, paths
 from ..coherence import BLOCKED
 from ..config import Config
 from ..pex import PexError, write_wrapper
-from ..style import Style, color, fail, info, note, ok, warn
+from ..runner import terminate_all
+from ..style import Style, color, emit, fail, info, note, ok, prefixed, warn
 from .base import Context, Step, StepFailed
+
+#: Cycled over the cells drawn in parallel, so two streams in the same
+#: terminal are told apart by colour as well as by name.
+TAG_COLORS = (Style.CYAN, Style.MAGENTA, Style.YELLOW, Style.GREEN, Style.BLUE)
+
+#: Longest cell name a tag spells out in full.
+TAG_WIDTH = 18
 
 #: What `make pnr` demands of every published cell.
 REQUIRED_VIEWS = (".lef", ".lib", ".gds")
@@ -101,22 +116,105 @@ class LayoutDrawingStep(Step):
                 return "ok"
             raise StepFailed("step 5 produced no minimized netlists", 2)
 
-        info(f"{len(netlists)} cell(s) to draw   mode={cfg.DRAW_MODE}")
-        outcomes = [self._one_cell(ctx, n, cells_v) for n in netlists]
+        jobs = max(1, min(cfg.DRAW_JOBS, len(netlists)))
+        info(f"{len(netlists)} cell(s) to draw   mode={cfg.DRAW_MODE}   "
+             f"jobs={jobs}")
+        if cfg.DRAW_MODE == "auto" and not self.dry_run:
+            # Checked here rather than per cell: with DRAW_JOBS threads about
+            # to start, "there is no claude on PATH" should stop the step,
+            # not be discovered five times in parallel.
+            self._claude()
+        outcomes = self._draw_cells(ctx, netlists, cells_v, jobs)
         return self._summarize(ctx, outcomes)
+
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _claude() -> str:
+        claude = shutil.which("claude")
+        if claude is None:
+            raise StepFailed(
+                "DRAW_MODE=auto needs the `claude` CLI on PATH. Use the "
+                "default DRAW_MODE=manual and draw the generator yourself.", 2)
+        return claude
+
+    def _draw_cells(self, ctx: Context, netlists: list, cells_v: Path,
+                    jobs: int) -> list:
+        """Every cell, one at a time or DRAW_JOBS of them at once.
+
+        Two cells share nothing but the container and this terminal: they
+        have their own build directory, their own generator and their own
+        agent session. The container copes; the terminal needs the per-cell
+        tag that emit() stamps on every line of a tagged thread.
+
+        Outcomes come back in netlist order however they were run, so the
+        summary and the coherence record do not depend on which cell
+        happened to finish first.
+        """
+        if jobs <= 1 or self.dry_run:
+            return [self._one_cell_guarded(ctx, n, cells_v) for n in netlists]
+
+        cells = [_cell_of(n) for n in netlists]
+        tags = _tags(cells)
+        info(f"drawing {jobs} cell(s) at a time — every line is tagged with "
+             "its cell")
+        if ctx.cfg.DRAW_MODE == "auto":
+            note(f"{jobs} concurrent agent session(s), each also driving the "
+                 f"container with JOBS={ctx.cfg.LAYOUT_JOBS}")
+
+        with ThreadPoolExecutor(max_workers=jobs,
+                                thread_name_prefix="draw") as pool:
+            futures = [pool.submit(self._one_cell_guarded, ctx, netlist,
+                                   cells_v, tags[cell])
+                       for netlist, cell in zip(netlists, cells)]
+            try:
+                return [future.result() for future in futures]
+            except KeyboardInterrupt:
+                # Only this thread got the SIGINT. The workers are blocked
+                # reading from children that are in their own sessions, so
+                # without this the flow would sit here until every agent
+                # turn ran to completion.
+                emit()
+                fail("interrupted — stopping every cell")
+                killed = terminate_all()
+                note(f"killed {killed} running command(s); "
+                     "the drawn generators are still on disk")
+                for future in futures:
+                    future.cancel()
+                raise
+
+    def _one_cell_guarded(self, ctx: Context, netlist: Path, cells_v: Path,
+                          tag: str = "") -> CellOutcome:
+        """_one_cell, but a failure is this cell's result, not the step's.
+
+        One cell that cannot be scaffolded must not take the other four
+        down with it -- least of all when they are half an hour into their
+        own drawing. _summarize still fails the step at the end.
+        """
+        cell = _cell_of(netlist)
+        with prefixed(tag):
+            try:
+                return self._one_cell(ctx, netlist, cells_v)
+            except StepFailed as exc:
+                fail(f"{cell}: {exc}")
+                return CellOutcome(cell, "failed", detail=str(exc))
+            except Exception as exc:                     # pragma: no cover
+                fail(f"{cell}: {type(exc).__name__}: {exc}")
+                emit(traceback.format_exc())
+                return CellOutcome(cell, "failed",
+                                   detail=f"{type(exc).__name__}: {exc}")
 
     # -----------------------------------------------------------------
     def _one_cell(self, ctx: Context, netlist: Path, cells_v: Path) -> CellOutcome:
         cfg, run = ctx.cfg, ctx.runner
-        cell = netlist.name[: -len("_minimized.spice")]
+        cell = _cell_of(netlist)
         baseline = paths.STEP_DIRS["5_gate_minimization"] / "raw_spice" / f"reference_{cell}.spice"
         build = self.ensure(cell)
         final = build / "final"
         generator = paths.LAYOUT_CELLS / f"{cell}.py"
 
-        print()
-        print(color(f"  ── {cell} " + "─" * max(0, 60 - len(cell)),
-                    Style.CYAN, Style.BOLD))
+        emit()
+        emit(color(f"  ── {cell} " + "─" * max(0, 60 - len(cell)),
+                   Style.CYAN, Style.BOLD))
 
         if not baseline.exists():
             warn(f"no PDK baseline at {paths.rel_to_project(baseline)} — the "
@@ -226,12 +324,7 @@ class LayoutDrawingStep(Step):
         if self.dry_run:
             info(f"{cell}: would run up to {cfg.DRAW_MAX_ITERS} agent turn(s)")
             return None
-        claude = shutil.which("claude")
-        if claude is None:
-            raise StepFailed(
-                "DRAW_MODE=auto needs the `claude` CLI on PATH. Use the "
-                "default DRAW_MODE=manual and draw the generator yourself.", 2)
-
+        claude = self._claude()
         generator = paths.LAYOUT_CELLS / f"{cell}.py"
         verdict = None
         idle = 0
@@ -325,6 +418,8 @@ class LayoutDrawingStep(Step):
         ]
         if cfg.DRAW_MODEL:
             argv += ["--model", cfg.DRAW_MODEL]
+        if cfg.DRAW_EFFORT:
+            argv += ["--effort", cfg.DRAW_EFFORT]
 
         env = dict(os.environ)
         # Without this the agent's own `make` would drive the container
@@ -332,30 +427,24 @@ class LayoutDrawingStep(Step):
         env["AION_CONTAINER_MOUNT"] = paths.CONTAINER_AION_FLOW
 
         log = self.log_dir / f"{cell}.agent.{iteration}.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        print(color(f"  ▶ claude -p  (turn {iteration}, {cell})", Style.WHITE))
-        try:
-            done = subprocess.run(
-                argv, cwd=str(paths.AION_FLOW), env=env,
-                capture_output=True, text=True, errors="replace",
-                timeout=cfg.DRAW_TIMEOUT,
-            )
-            log.write_text((done.stdout or "") + (done.stderr or ""))
-            status = done.returncode
-        except subprocess.TimeoutExpired as exc:
-            log.write_text(str(exc.stdout or "") + str(exc.stderr or ""))
-            status = 124
+        emit(color(f"  ▶ claude -p  (turn {iteration}/{cfg.DRAW_MAX_ITERS}, "
+                   f"{cell})", Style.WHITE))
+        note(f"live log {paths.rel_to_project(log)}")
+
+        # The turn is narrated as it runs and teed to the log as it arrives:
+        # a turn is half an hour long, and both the silence and the
+        # write-at-the-end log were how an interrupted turn left nothing
+        # behind to look at.
+        turn = agent.run(argv, cwd=paths.AION_FLOW, env=env, log=log,
+                         timeout=cfg.DRAW_TIMEOUT, stream=cfg.DRAW_STREAM,
+                         echo=not ctx.runner.quiet)
 
         # A timed-out or non-zero agent that still wrote a complete generator
         # has produced the artifact; the caller grades the file, not this.
-        note(f"agent exit {status}   log {paths.rel_to_project(log)}")
-        if status == 0:
-            return ""
-        try:
-            said = log.read_text().strip().splitlines()
-        except OSError:
-            said = []
-        return said[-1][:200] if said else f"exit {status}, no output"
+        note(f"agent exit {turn.returncode} in {turn.duration_s:.0f}s   "
+             f"log {paths.rel_to_project(log)}")
+        return turn.report or (f"exit {turn.returncode}, no output"
+                               if not turn.ok else "")
 
     # -----------------------------------------------------------------
     def _publish(self, ctx: Context, cell: str, final: Path) -> bool:
@@ -465,7 +554,7 @@ class LayoutDrawingStep(Step):
     def _print_manual_instructions(self, cell: str, netlist: Path,
                                    baseline: Path, build: Path) -> None:
         tool = paths.LAYOUT_TOOL
-        print()
+        emit()
         warn(f"{cell} is waiting for a layout")
         note(f"draw   {paths.rel_to_project(paths.LAYOUT_CELLS / f'{cell}.py')}")
         note("then, from anywhere:")
@@ -486,6 +575,12 @@ class LayoutDrawingStep(Step):
         tracked with a fixed list.
         """
         core = paths.FLOW_DIR / "aion_cells.core"
+        if self.dry_run:
+            # A preview must not overwrite the handle the post-PnR simulation
+            # reads: with nothing published in a dry run, this would rewrite
+            # a real cell list back to the placeholder.
+            note(f"would regenerate {paths.rel_to_project(core)}")
+            return
         models = []
         for cell in sorted(cells):
             model = self.outdir / cell / "final" / f"{cell}.v"
@@ -545,7 +640,7 @@ targets:
         published = [o for o in drawn if o.published]
         self._write_cells_core([o.cell for o in published])
 
-        print()
+        emit()
         info(f"{len(published)}/{len(outcomes)} cell(s) published to "
              f"{paths.rel_to_project(paths.CELLS_DIR)}")
         for outcome in outcomes:
@@ -571,6 +666,25 @@ targets:
         if not published:
             raise StepFailed("no cell was published; step 7 has nothing to place", 1)
         return "ok"
+
+
+def _cell_of(netlist: Path) -> str:
+    """The cell name step 5 encoded in the netlist's file name."""
+    return netlist.name[: -len("_minimized.spice")]
+
+
+def _tags(cells: list) -> dict:
+    """A short, coloured, column-aligned tag per cell.
+
+    The AION_ prefix is dropped: every cell here has it, so it is a column
+    of noise in front of the part that differs.
+    """
+    short = {cell: (cell[5:] if cell.startswith("AION_") else cell)[:TAG_WIDTH]
+             for cell in cells}
+    width = max((len(s) for s in short.values()), default=0)
+    return {cell: color(f"[{short[cell]:<{width}}] ",
+                        TAG_COLORS[index % len(TAG_COLORS)])
+            for index, cell in enumerate(cells)}
 
 
 STEP = LayoutDrawingStep()

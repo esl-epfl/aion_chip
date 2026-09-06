@@ -9,6 +9,7 @@ cells. Everything they produce lands in `flow/`.
 ./flow.py 2..5                 # a range
 ./flow.py 5-                   # step 5 to the end
 ./flow.py 6 --draw auto        # let an agent draw the layouts
+./flow.py 6 --draw auto -j 3   # ... three cells at a time
 ./flow.py status               # is this flow coherent?
 ./flow.py --list               # what the steps are
 ./flow.py --dry-run            # print every command, run nothing
@@ -26,6 +27,7 @@ prefix of the name (`rew`). Ranges are `2..5` (inclusive) or `5-` (to the end).
 |---|---|
 | `--set NAME=VALUE` | override a flow variable; repeatable. See [Every setting](#every-setting). |
 | `--draw manual\|auto` | step 6 only: hand-drawn (default) or agent-drawn layouts |
+| `--draw-jobs N`, `-j N` | step 6 only: cells to work on at once (default 1). In `--draw auto` that is N agent sessions in parallel. |
 | `--lenient` | downgrade LibreLane's hard checkers to warnings. Never for signoff. |
 | `--force` | run without the stale-upstream warning |
 | `--dry-run` | print every command and run nothing — no tools, no model tokens |
@@ -160,6 +162,53 @@ generator untouched the step stops and says so, rather than burning the
 remaining turns: that means the agent is not running (no quota, no
 credentials, a refusal), which is a different problem from a hard layout.
 
+It draws with `DRAW_MODEL` at `DRAW_EFFORT` — Opus 5 at high effort by
+default. The generator is the one artifact in this flow that nothing can
+compute, and every turn costs a container DRC/LVS round trip whatever model
+wrote it, so a weaker model mostly buys more turns:
+
+```bash
+./flow.py 6 --draw auto --set DRAW_MODEL=claude-sonnet-5 --set DRAW_EFFORT=max
+./flow.py 6 --draw auto --set DRAW_MODEL=none    # whatever your CLI defaults to
+```
+
+Each turn is narrated while it runs — the tools the agent calls, the verdict
+lines they print back, and a `… still working` heartbeat when one container
+call takes minutes:
+
+```
+  ▶ claude -p  (turn 3/12, AION_mux2_3)
+    00:00  session 8cb8c267  model claude-opus-5  30 tool(s)
+    00:04  ⚙ Read  cells/AION_mux2_3.py
+    00:21  ⚙ Bash  make -C tools/aion_layout_claude verify CELL=AION_mux2_3 …
+    02:57  ✖ RESULT: FAIL
+    03:04  ⚙ Edit  cells/AION_mux2_3.py
+    …
+    24:11  claude exit 0  31 turn(s)  $1.87  session 8cb8c267
+```
+
+The same stream is teed to `flow/logs/6_layout_drawing/<CELL>.agent.<n>.log`
+as it arrives, so `tail -f` works and an interrupted turn still leaves its
+whole history behind. `--set DRAW_STREAM=false` goes back to one block at the
+end, and `--quiet` drops the terminal half while keeping the log.
+
+**`-j N` / `--draw-jobs N`** works on N cells at once — in `--draw auto`, N
+agent sessions in parallel. Cells share nothing but the EDA container and the
+terminal: their own build directory, their own generator, their own session.
+Every line is tagged with the cell it came from:
+
+```
+[mux2_3      ]   ▶ claude -p  (turn 2/12, AION_mux2_3)
+[nand2_o21ai ]     03:12  ⚙ Bash  make -C tools/aion_layout_claude verify …
+[mux2_3      ]     00:08  ⚙ Edit  cells/AION_mux2_3.py
+```
+
+Each session also drives the container with `LAYOUT_JOBS` ngspice jobs of its
+own, so N multiplies that; 2–4 is a sensible range on a workstation. One cell
+failing no longer takes the others down — it is reported as that cell's
+result, and the step still fails at the end. Ctrl-C stops every agent and
+every container call it started, not just the one the flow was watching.
+
 A published cell needs `.lef`, `.lib` and `.gds`; `.v`, `.spice` and `.cdl`
 come with them. They land in `implementation/cells/<CELL>/`, which is where
 `make pnr` looks. `COMPARE: LOSS` (the cell is bigger or slower than the
@@ -219,12 +268,12 @@ to manual.
 | `MAX_SIZE` | `3` | 2, 3 | cells per mined pattern (2–8) |
 | `MIN_OCCURRENCES` | `2` | 2, 3 | times a pattern must be mined to be kept |
 | `MIN_SELECTED` | `None` | 2, 3 | times it must survive the cover (`None` = same as `MIN_OCCURRENCES`; `1` disables) |
-| `AREA_FACTOR` | `0.85` | 2, 3 | assumed area of a merged cell vs the gates it replaces |
+| `AREA_FACTOR` | `0.65` | 2, 3 | assumed area of a merged cell vs the gates it replaces |
 | `MAX_OUTPUTS` | `1` | 2, 3 | boundary outputs per pattern (`None` = no limit) |
-| `MAX_INPUTS` | `None` | 2, 3 | boundary inputs per pattern (`None` = no limit) |
+| `MAX_INPUTS` | `5` | 2, 3 | boundary inputs per pattern (`None` = no limit) |
 | `JOBS` | `None` | 2, 3 | mining workers (`None` = every core) |
 | `CELL_PREFIX` | `AION_` | 2, 3 | prefix of every generated module. **Change this and you must change `RSZ_DONT_TOUCH_RX` in `implementation/config.json` with it**, or PnR's resizer will buffer your cells away. |
-| `ELITE_COUNT` | `1` | 2 | size of the elite library (`None` = keep every cell) |
+| `ELITE_COUNT` | `5` | 2 | size of the elite library (`None` = keep every cell) |
 | `ELITE_METRIC` | `saved-area` | 2 | `saved-area`, `occurrences` or `saved-area-per-cell` |
 | `REWRITE_CELLS` | `elite` | 3 | `elite`, `all`, or a path to a hand-curated `.v` |
 | `REWRITE_FLAT` | `False` | 3 | also emit the flattened netlist (only needed for a sequential equivalence check) |
@@ -237,9 +286,12 @@ to manual.
 | `LAYOUT_CORNERS` | `typ` | 6 | `typ` or `all`. **Keep `typ`** — see below. |
 | `LAYOUT_JOBS` | `8` | 6 | parallel ngspice jobs during characterization |
 | `DRAW_MODE` | `manual` | 6 | `manual` or `auto` |
+| `DRAW_JOBS` | `1` | 6 | cells worked on at once (`-j N`); in `auto`, parallel agent sessions |
+| `DRAW_STREAM` | `True` | 6 | narrate each agent turn while it runs |
 | `DRAW_MAX_ITERS` | `12` | 6 | agent turns per cell before giving up |
 | `DRAW_TIMEOUT` | `1800` | 6 | seconds per agent turn |
-| `DRAW_MODEL` | `None` | 6 | model for `claude -p` (`None` = its default) |
+| `DRAW_MODEL` | `claude-opus-5` | 6 | the model that draws (`None` = the CLI's own default) |
+| `DRAW_EFFORT` | `high` | 6 | thinking effort per turn: `low`, `medium`, `high`, `xhigh`, `max` (`None` = leave the CLI's setting alone) |
 | `DRAW_PUBLISH_ON_LOSS` | `True` | 6 | publish a cell that lost the area/delay comparison |
 | `LAYOUT_VERIFY_PEX` | `True` | 6 | re-prove the extracted layout's function in SPICE |
 | `SDF_CORNER` | `nom_slow_1p08V_125C` | 7 | also `nom_typ_1p20V_25C`, `nom_fast_1p32V_m40C` |
@@ -247,8 +299,9 @@ to manual.
 
 Three of those decide whether the flow works at all:
 
-- **`ELITE_COUNT = 1`** — one cell, because each one costs a hand-drawn
-  layout. Raise it once the chain is proven.
+- **`ELITE_COUNT`** — every kept cell costs a drawn layout, so this is the
+  knob that decides how long step 6 takes. `--draw-jobs` buys some of that
+  back by drawing them in parallel.
 - **`LAYOUT_CORNERS = typ`** — `all` makes the exporter publish one Liberty
   per corner, and `make pnr` groups cell views by file stem, so the extra
   `.lib` files become phantom cells with no LEF and PnR refuses to start. The

@@ -66,12 +66,12 @@ class Config:
     MAX_SIZE: int = 3
     MIN_OCCURRENCES: int = 2
     MIN_SELECTED: Optional[int] = None
-    AREA_FACTOR: float = 0.85
+    AREA_FACTOR: float = 0.65
     MAX_OUTPUTS: Optional[int] = 1
-    MAX_INPUTS: Optional[int] = None
+    MAX_INPUTS: Optional[int] = 5
     JOBS: Optional[int] = None
     CELL_PREFIX: str = "AION_"
-    ELITE_COUNT: Optional[int] = 1
+    ELITE_COUNT: Optional[int] = 2
     ELITE_METRIC: str = "saved-area"
 
     # =====================================================================
@@ -120,12 +120,29 @@ class Config:
     #                 file stem -- three .lib files become three phantom
     #                 cells with no LEF and no GDS, and PnR refuses to start.
     # DRAW_MODE       manual | auto.  See step 6 for the loop.
+    # DRAW_JOBS       cells worked on at once -- in auto mode that is this
+    #                 many concurrent `claude` sessions, each also driving
+    #                 the container, so it multiplies LAYOUT_JOBS.  Every
+    #                 line of output is tagged with its cell.
+    # DRAW_STREAM     narrate each agent turn while it runs (the tools it
+    #                 calls and what they answered).  Off, `claude -p` says
+    #                 nothing until the turn ends half an hour later.
+    # DRAW_MODEL      the model that draws.  The layout generator is the one
+    #                 artifact in this flow nothing can compute, and a turn
+    #                 costs a container DRC/LVS round trip either way, so the
+    #                 cheap model is not the cheap option here.
+    # DRAW_EFFORT     how hard it thinks per turn: low | medium | high |
+    #                 xhigh | max.  Either of these set to None ("none" on
+    #                 the command line) leaves the CLI's own setting alone.
     LAYOUT_CORNERS: str = "typ"
     LAYOUT_JOBS: int = 8
     DRAW_MODE: str = "manual"
+    DRAW_JOBS: int = 1
+    DRAW_STREAM: bool = True
     DRAW_MAX_ITERS: int = 12
     DRAW_TIMEOUT: int = 1800
-    DRAW_MODEL: Optional[str] = None
+    DRAW_MODEL: Optional[str] = "claude-opus-5"
+    DRAW_EFFORT: Optional[str] = "high"
     # Publish a cell into implementation/cells/ even when it lost the
     # area/delay comparison against the abutted PDK baseline.
     DRAW_PUBLISH_ON_LOSS: bool = True
@@ -156,6 +173,9 @@ class Config:
         "SYNTH_SIM_TOOL": ("verilator", "icarus"),
         "PNR_SIM_TOOL": ("verilator", "icarus"),
         "LAYOUT_CORNERS": ("typ", "all"),
+        # "none" is how the command line spells "leave the CLI's own effort
+        # setting alone"; _coerce turns it into None.
+        "DRAW_EFFORT": ("low", "medium", "high", "xhigh", "max", "none"),
         "ELITE_METRIC": ("saved-area", "occurrences", "saved-area-per-cell"),
         "MINIMIZER_MODE": ("transistor", "area", "balance"),
         "SDF_CORNER": ("nom_typ_1p20V_25C", "nom_fast_1p32V_m40C",

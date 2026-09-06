@@ -7,6 +7,7 @@
 #    python flow.py 3               run 3_rewrite alone
 #    python flow.py 2..5            run a range
 #    python flow.py 6 --draw auto   let an agent draw the layouts
+#    python flow.py 6 --draw auto -j 3   ... three cells at a time
 #    python flow.py status          is this flow coherent?
 #
 #  Each step is independent: it reads what it declares, writes under
@@ -27,7 +28,7 @@ from . import paths, steps
 from .coherence import (BLOCKED, Coherence, FAILED, MISSING, OK, STALE,
                         Verdict, badge, now)
 from .config import Config
-from .runner import Runner, StepFailed, container_running
+from .runner import Runner, StepFailed, container_running, terminate_all
 from .style import Style, banner, color, fail, info, note, ok, section, title, warn
 
 EPILOG = """\
@@ -45,6 +46,7 @@ examples
   python flow.py 2 --set ELITE_COUNT=2    mine, keep the best two cells
   python flow.py 3 --set REWRITE_CELLS=flow/my_cells.v
   python flow.py 6 --draw auto            agent-drawn layouts
+  python flow.py 6 --draw auto -j 3       three of them at once
   python flow.py status                   per-step timestamps and staleness
 """
 
@@ -65,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--draw", choices=("manual", "auto"),
                         help="step 6: draw the layouts by hand (default) or "
                              "with an agent")
+    parser.add_argument("--draw-jobs", "-j", type=int, metavar="N",
+                        dest="draw_jobs",
+                        help="step 6: cells to work on at once (default 1). "
+                             "With --draw auto that is N agent sessions in "
+                             "parallel; every line is tagged with its cell.")
     parser.add_argument("--lenient", action="store_true",
                         help="downgrade LibreLane's hard checkers to warnings")
     parser.add_argument("--force", action="store_true",
@@ -239,6 +246,10 @@ def main(argv: Optional[list] = None) -> int:
         parser.error(str(exc))
     if args.draw:
         cfg.DRAW_MODE = args.draw
+    if args.draw_jobs is not None:
+        if args.draw_jobs < 1:
+            parser.error("--draw-jobs must be at least 1")
+        cfg.DRAW_JOBS = args.draw_jobs
     if args.lenient:
         cfg.LENIENT = True
     if args.timeout:
@@ -289,8 +300,12 @@ def main(argv: Optional[list] = None) -> int:
                 return 1
             return code if 0 < code < 256 else 1
         except KeyboardInterrupt:
+            # Every child is in its own process group, so the terminal's
+            # SIGINT reached this process only.
             print()
-            fail("interrupted")
+            killed = terminate_all()
+            fail(f"interrupted — killed {killed} running command(s)"
+                 if killed else "interrupted")
             return 130
         except Exception:                                # pragma: no cover
             traceback.print_exc()
