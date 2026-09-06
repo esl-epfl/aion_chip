@@ -70,7 +70,7 @@
 
     "pnr": {
       "//": "PnR from a pre-existing netlist that may instantiate AI-generated cells.",
-      "RSZ_DONT_TOUCH_RX": "^aion_.*"
+      "RSZ_DONT_TOUCH_RX": "^_AION_.*"
     },
 
     "pnr_simple": {},

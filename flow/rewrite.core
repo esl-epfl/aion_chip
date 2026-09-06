@@ -1,0 +1,36 @@
+CAPI=2:
+
+# ================================================================
+#  Project:     AION
+#  Author:      Filippo Quadri <filippo.quadri@epfl.ch>
+#  Created:     2026-09-06
+#  Description: Fixed handle on the artifacts of flow step 3_rewrite
+# ================================================================
+
+name: epfl:aion:flow_rewrite:1.0.0
+description: |
+  output of `python flow.py 3`: the synthesis netlist with the mined AION
+  cells substituted in, plus the library that defines them.
+
+  Both files are needed together: the netlist instantiates the AION modules
+  and nothing else declares them, so a simulator handed only the netlist
+  elaborates a design full of black boxes. The AION cells are structural
+  Verilog over PDK cells, so the usual gate-level model set still applies on
+  top of these two.
+
+  The directory is wiped and rewritten by every run of step 3, so this core
+  is the stable name the simulation targets in aion.core depend on. The
+  files below do not exist until that step has run at least once.
+
+filesets:
+  netlist:
+    files:
+      - 3_rewrite/nl/aion_cells.v
+      - 3_rewrite/nl/tt_um_aion.nl.v
+    file_type: verilogSource
+
+targets:
+  default: &default
+    filesets:
+      - netlist
+    toplevel: tt_um_aion

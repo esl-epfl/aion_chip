@@ -14,13 +14,27 @@ cells/                   AI-generated standard cells (see cells/README.md)
 
 | Target            | In                                  | Out                                  |
 | ----------------- | ----------------------------------- | ------------------------------------ |
-| `make synth`      | VHDL via FuseSoC                    | `flow/synth/` — netlist + pre-PnR STA |
-| `make pnr`        | `NETLIST=` + `CELLS_DIR=`           | `flow/pnr/` — GDS                     |
+| `make synth`      | VHDL via FuseSoC                    | `flow/1_synth/` — netlist + pre-PnR STA |
+| `make pnr`        | `NETLIST=` + `CELLS_DIR=`           | `flow/7_pnr/` — GDS                   |
 | `make pnr_simple` | VHDL via FuseSoC                    | `flow/pnr_simple/` — GDS, PDK cells only |
 
 Each of these hardens in `.build/<target>_aion/` and then copies the last run's
-views, metrics and reports into `flow/<target>/`, which is the fixed path the
-gate-level simulation targets read.
+views, metrics and reports into the directory in the table, which is the fixed
+path the gate-level simulation targets read. The destination is a variable, so
+the flow handler and a hand-run `make` land in the same place:
+
+| Variable | Default |
+| -------- | ------- |
+| `SYNTH_OUT_DIR` | `flow/1_synth` |
+| `PNR_OUT_DIR` | `flow/7_pnr` |
+| `PNR_SIMPLE_OUT_DIR` | `flow/pnr_simple` |
+
+`_save_run` refuses an output directory outside `flow/`, and **wipes it** before
+copying — so never point one at a directory holding anything you want to keep.
+
+`make synth` is flow step 1 and `make pnr` is flow step 7; `./flow.py` calls
+them with these variables set. `make pnr_simple` is the PDK-only baseline and
+belongs to no step.
 
 `make pnr` skips synthesis: it hands LibreLane the netlist as the flow's initial
 state (`--from Checker.NetlistAssignStatements -e nl=…`) and runs the rest of

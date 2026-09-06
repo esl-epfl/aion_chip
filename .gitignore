@@ -7,11 +7,29 @@ __pycache__/
 # fusesoc build directory
 .build/
 
-# physical-implementation outputs. flow/*.core and flow/README.md are tracked;
-# everything the LibreLane targets write under flow/ is not.
+# flow outputs. flow/*.core and flow/README.md are tracked; everything the
+# flow steps write under flow/ is not. One directory per step, plus the
+# coherence file that records what ran when.
+flow/1_synth/
+flow/2_pattern_extraction/
+flow/3_rewrite/
+flow/4_characterization/
+flow/5_gate_minimization/
+flow/6_layout_drawing/
+flow/7_pnr/
+flow/pnr_simple/
+flow/logs/
+flow/coherence.json
+
+# the pre-rename output directories, so a tree that predates the numbered
+# step layout does not show hundreds of MB as untracked.
 flow/synth/
 flow/pnr/
-flow/pnr_simple/
+
+# views the flow publishes for `make pnr`; implementation/cells/README.md
+# is tracked, the generated cell views are not.
+implementation/cells/*/
+
 
 # nvim/vscode stuff
 .nvim/

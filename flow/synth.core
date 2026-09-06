@@ -9,7 +9,7 @@ CAPI=2:
 
 name: epfl:aion:flow_synth:1.0.0
 description: |
-  output of `make synth`: gate-level netlist and pre-PnR STA reports
+  output of `make synth` (flow step 1): gate-level netlist and pre-PnR STA reports
 
   The directory it points at is wiped and rewritten by every `make synth`, so
   this core is the stable name the simulation targets in aion.core depend on.
@@ -18,7 +18,7 @@ description: |
 filesets:
   netlist:
     files:
-      - synth/nl/tt_um_aion.nl.v
+      - 1_synth/nl/tt_um_aion.nl.v
     file_type: verilogSource
 
 targets:

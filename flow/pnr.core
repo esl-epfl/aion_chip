@@ -9,7 +9,7 @@ CAPI=2:
 
 name: epfl:aion:flow_pnr:1.0.0
 description: |
-  output of `make pnr`: hardened from a netlist plus the AI-generated cells
+  output of `make pnr` (flow step 7): hardened from a netlist plus the AI-generated cells
 
   The directory it points at is wiped and rewritten by every `make pnr`, so
   this core is the stable name the simulation targets in aion.core depend on.
@@ -18,7 +18,7 @@ description: |
 filesets:
   netlist:
     files:
-      - pnr/nl/tt_um_aion.nl.v
+      - 7_pnr/nl/tt_um_aion.nl.v
     file_type: verilogSource
 
 targets:

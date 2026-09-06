@@ -41,9 +41,10 @@ ifdef CONDA_PREFIX
 	export LD_PRELOAD      := $(CONDA_PREFIX)/lib/libpython3.12.so.1.0
 endif
 
-.PHONY: all sim post_synth_sim post_pnr_sim post_pnr_sim_ai sim_all setup format \
+.PHONY: all sim post_synth_sim post_synth_sim_ai post_pnr_sim post_pnr_sim_ai sim_all setup format \
         clean clean-impl clean-flow clean-all waves synth pnr pnr_simple librelane \
-        openroad klayout _save_run _setup_cocotb_env _require_sdf
+        openroad klayout _save_run _setup_cocotb_env _require_sdf _check_sim_results \
+        flow flow-status flow-list
 
 all: sim
 
@@ -74,7 +75,7 @@ TOOL   ?= ghdl
 #   nom_typ_1p20V_25C | nom_fast_1p32V_m40C | nom_slow_1p08V_125C
 # SDF_CORNER ?= nom_typ_1p20V_25C
 SDF_CORNER ?= nom_slow_1p08V_125C
-PNR_SDF     = $(FLOW_DIR)/pnr_simple/sdf/$(SDF_CORNER)/$(TOPLEVEL)__$(SDF_CORNER).sdf
+PNR_SDF     = $(PNR_SIMPLE_OUT_DIR)/sdf/$(SDF_CORNER)/$(TOPLEVEL)__$(SDF_CORNER).sdf
 
 # Dumping every net of a ~12k-cell netlist costs more than the simulation does.
 # 1 = the DUT's own ports, which is what you want 95% of the time.
@@ -90,22 +91,35 @@ sim: TARGET := rtl_sim
 sim: TOOL   := ghdl
 sim: _setup_cocotb_env ## RTL simulation of the VHDL sources (GHDL)
 	$(FUSESOC_RUN) $(PARAM_FLAGS)
+	@$(MAKE) --no-print-directory _check_sim_results TARGET=$(TARGET)
 
 post_synth_sim: TOOL   := verilator
 post_synth_sim: TARGET  = $(if $(filter icarus,$(TOOL)),post_synth_sim_icarus,post_synth_sim)
 post_synth_sim: _setup_cocotb_env ## Post-synthesis gate-level sim, no timing (TOOL=verilator|icarus)
-	@if [ ! -f "$(FLOW_DIR)/synth/nl/$(TOPLEVEL).nl.v" ]; then \
-		echo "Error: no synthesis netlist at $(FLOW_DIR)/synth/nl/$(TOPLEVEL).nl.v"; \
+	@if [ ! -f "$(SYNTH_OUT_DIR)/nl/$(TOPLEVEL).nl.v" ]; then \
+		echo "Error: no synthesis netlist at $(SYNTH_OUT_DIR)/nl/$(TOPLEVEL).nl.v"; \
 		echo "       run 'make synth' first."; \
 		exit 1; \
 	fi
 	$(FUSESOC_RUN) $(ICARUS_DUMP) $(PARAM_FLAGS)
+	@$(MAKE) --no-print-directory _check_sim_results TARGET=$(TARGET)
+
+post_synth_sim_ai: TOOL   := verilator
+post_synth_sim_ai: TARGET  = $(if $(filter icarus,$(TOOL)),post_synth_sim_ai_icarus,post_synth_sim_ai)
+post_synth_sim_ai: _setup_cocotb_env ## Post-synthesis sim of the AION-cell netlist (output of step 3)
+	@if [ ! -f "$(REWRITE_OUT_DIR)/nl/$(TOPLEVEL).nl.v" ]; then \
+		echo "Error: no rewritten netlist at $(REWRITE_OUT_DIR)/nl/$(TOPLEVEL).nl.v"; \
+		echo "       run 'python flow.py 3' first."; \
+		exit 1; \
+	fi
+	$(FUSESOC_RUN) $(ICARUS_DUMP) $(PARAM_FLAGS)
+	@$(MAKE) --no-print-directory _check_sim_results TARGET=$(TARGET)
 
 post_pnr_sim: TOOL   := icarus
 post_pnr_sim: TARGET  = $(if $(filter verilator,$(TOOL)),post_pnr_sim_verilator,post_pnr_sim)
 post_pnr_sim: _setup_cocotb_env ## Post-PnR gate-level sim with SDF delays (TOOL=verilator drops the delays)
-	@if [ ! -f "$(FLOW_DIR)/pnr_simple/nl/$(TOPLEVEL).nl.v" ]; then \
-		echo "Error: no post-PnR netlist at $(FLOW_DIR)/pnr_simple/nl/$(TOPLEVEL).nl.v"; \
+	@if [ ! -f "$(PNR_SIMPLE_OUT_DIR)/nl/$(TOPLEVEL).nl.v" ]; then \
+		echo "Error: no post-PnR netlist at $(PNR_SIMPLE_OUT_DIR)/nl/$(TOPLEVEL).nl.v"; \
 		echo "       run 'make pnr_simple' first."; \
 		exit 1; \
 	fi
@@ -117,16 +131,48 @@ else
 	@$(MAKE) --no-print-directory _require_sdf SDF=$(PNR_SDF)
 	$(FUSESOC_RUN) --sdf_file=$(PNR_SDF) $(ICARUS_DUMP) $(PARAM_FLAGS)
 endif
+	@$(MAKE) --no-print-directory _check_sim_results TARGET=$(TARGET)
 
-post_pnr_sim_ai: TARGET := post_pnr_sim_ai
 post_pnr_sim_ai: TOOL   := icarus
-post_pnr_sim_ai: SDF     = $(FLOW_DIR)/pnr/sdf/$(SDF_CORNER)/$(TOPLEVEL)__$(SDF_CORNER).sdf
-post_pnr_sim_ai: _setup_cocotb_env ## Post-PnR sim of the AI-cell flow (output of `make pnr`)
+post_pnr_sim_ai: TARGET  = $(if $(filter verilator,$(TOOL)),post_pnr_sim_ai_verilator,post_pnr_sim_ai)
+post_pnr_sim_ai: SDF     = $(PNR_OUT_DIR)/sdf/$(SDF_CORNER)/$(TOPLEVEL)__$(SDF_CORNER).sdf
+post_pnr_sim_ai: _setup_cocotb_env ## Post-PnR sim of the AI-cell flow (TOOL=verilator drops the delays)
+ifeq ($(TOOL),verilator)
+	@echo "Warning: Verilator ignores \$$sdf_annotate. This run has NO timing;"
+	@echo "         it only re-checks the function of the AI-cell netlist."
+	$(FUSESOC_RUN) $(PARAM_FLAGS)
+else
 	@$(MAKE) --no-print-directory _require_sdf SDF=$(SDF)
 	$(FUSESOC_RUN) --sdf_file=$(SDF) $(ICARUS_DUMP) $(PARAM_FLAGS)
+endif
+	@$(MAKE) --no-print-directory _check_sim_results TARGET=$(TARGET)
 
 sim_all: ## Run every simulation stage and print a summary table
 	@$(PYTHON) $(PROJECT_ROOT)/scripts/sim_all.py
+
+# cocotb reports a failing test by printing FAIL and writing <failure/> into
+# results.xml -- and then the simulator exits 0 anyway. Verified: a testbench
+# that does nothing but `assert False` gives TESTS=1 PASS=0 FAIL=1 and
+# `make post_synth_sim` still exits 0. Without this check every simulation
+# target is decorative, and so is anything built on top of them.
+_check_sim_results:
+	@xml="$(SIM_WORK_DIR)/results.xml"; \
+	if [ ! -f "$$xml" ]; then \
+		echo "Error: the simulation wrote no cocotb results at $$xml"; \
+		echo "       the run did not reach the testbench -- read the log above."; \
+		exit 1; \
+	fi; \
+	total=$$(grep -c '<testcase ' "$$xml" 2>/dev/null || true); \
+	bad=$$(grep -c -E '<(failure|error)[ />]' "$$xml" 2>/dev/null || true); \
+	if [ "$${total:-0}" -eq 0 ]; then \
+		echo "Error: $$xml records no test cases at all."; \
+		exit 1; \
+	fi; \
+	if [ "$${bad:-0}" -ne 0 ]; then \
+		echo "Error: $$bad of $$total cocotb test(s) FAILED ($$xml)."; \
+		exit 1; \
+	fi; \
+	echo "cocotb: $$total/$$total test(s) passed"
 
 _require_sdf:
 	@if [ ! -f "$(SDF)" ]; then \
@@ -166,8 +212,13 @@ clean:  ## Remove the simulation builds and the __pycache__ dirs (keeps the Libr
 clean-impl:  ## Remove the LibreLane run directories (hours of work — be sure)
 	rm -rf $(IMPL_BUILD_DIRS)
 
-clean-flow:  ## Remove the saved physical-implementation artifacts under flow/
-	rm -rf $(FLOW_DIR)/synth $(FLOW_DIR)/pnr $(FLOW_DIR)/pnr_simple
+clean-flow:  ## Remove every flow step's output under flow/ (keeps the .core files)
+	rm -rf $(FLOW_DIR)/[1-7]_* $(FLOW_DIR)/pnr_simple $(FLOW_DIR)/logs \
+	       $(FLOW_DIR)/coherence.json
+	@# flow/synth and flow/pnr are where `make synth` and `make pnr` wrote
+	@# before the step directories were numbered. A tree that predates that
+	@# rename still has them, and nothing else would ever remove them.
+	@rm -rf $(FLOW_DIR)/synth $(FLOW_DIR)/pnr
 
 clean-all: clean clean-impl clean-flow  ## All three of the above
 
@@ -206,13 +257,23 @@ LIBRELANE_PIN_ORDER   = $(IMPL_DIR)/pin_order.cfg
 # Outputs: generated, git-ignored apart from the .core files.
 FLOW_DIR              = $(PROJECT_ROOT)/flow
 
+# Where each hardening target saves its views. One directory per flow step,
+# numbered so `flow/` reads in the order the steps run; the flow handler
+# (scripts/flow/, driven by ./flow.py) overrides them to the same values, so
+# these targets behave identically whether you run them by hand or from it.
+# _save_run refuses an OUT_DIR outside $(FLOW_DIR), so keep them under it.
+SYNTH_OUT_DIR        ?= $(FLOW_DIR)/1_synth
+REWRITE_OUT_DIR      ?= $(FLOW_DIR)/3_rewrite
+PNR_OUT_DIR          ?= $(FLOW_DIR)/7_pnr
+PNR_SIMPLE_OUT_DIR   ?= $(FLOW_DIR)/pnr_simple
+
 # Directory of AI-generated cell views (LEF/LIB/GDS/Verilog/SPICE), consumed by
 # `make pnr` only. Empty or absent means "PDK standard cells only".
 CELLS_DIR            ?= $(IMPL_DIR)/cells
 
 # Netlist `make pnr` hardens. Defaults to whatever `make synth` last saved;
 # point it at the AI-rewritten netlist once the cell substitution has run.
-NETLIST              ?= $(FLOW_DIR)/synth/nl/$(TOPLEVEL).nl.v
+NETLIST              ?= $(SYNTH_OUT_DIR)/nl/$(TOPLEVEL).nl.v
 
 SYNTH_RUN_DIR        := $(BUILD_DIR)/synth_$(CORE)
 PNR_RUN_DIR          := $(BUILD_DIR)/pnr_$(CORE)
@@ -284,13 +345,13 @@ define librelane_finish
 	exit $$status
 endef
 
-synth: ## Synthesis + pre-PnR STA -> flow/synth/
+synth: ## Synthesis + pre-PnR STA -> flow/1_synth/
 	$(call librelane_prepare,$(SYNTH_RUN_DIR),synth,$(LENIENT_FLAG))
 	$(call librelane_run,$(SYNTH_RUN_DIR),)
-	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(SYNTH_RUN_DIR) OUT_DIR=$(FLOW_DIR)/synth
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(SYNTH_RUN_DIR) OUT_DIR=$(SYNTH_OUT_DIR)
 	$(call librelane_finish,$(SYNTH_RUN_DIR))
 
-pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) -> flow/pnr/
+pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) -> flow/7_pnr/
 	@$(PYTHON) $(PROJECT_ROOT)/scripts/collect_cells.py $(CELLS_DIR) $(LENIENT_FLAG)
 	@if [ ! -f "$(NETLIST)" ]; then \
 		echo "Error: netlist not found: $(NETLIST)"; \
@@ -301,13 +362,13 @@ pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) ->
 	@cp -v $(NETLIST) $(PNR_RUN_DIR)/nl/$(TOPLEVEL).nl.v
 	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,--pin-order $(LIBRELANE_PIN_ORDER) --cells-dir $(CELLS_DIR) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_RUN_DIR),--from Checker.NetlistAssignStatements -e nl=nl/$(TOPLEVEL).nl.v)
-	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(FLOW_DIR)/pnr
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(PNR_OUT_DIR)
 	$(call librelane_finish,$(PNR_RUN_DIR))
 
 pnr_simple: ## Full RTL -> GDS flow with the PDK standard cells only -> flow/pnr_simple/
 	$(call librelane_prepare,$(PNR_SIMPLE_RUN_DIR),pnr_simple,--pin-order $(LIBRELANE_PIN_ORDER) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_SIMPLE_RUN_DIR),)
-	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_SIMPLE_RUN_DIR) OUT_DIR=$(FLOW_DIR)/pnr_simple
+	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_SIMPLE_RUN_DIR) OUT_DIR=$(PNR_SIMPLE_OUT_DIR)
 	$(call librelane_finish,$(PNR_SIMPLE_RUN_DIR))
 
 librelane: pnr_simple ## Alias for pnr_simple
@@ -327,6 +388,34 @@ klayout: ## Open the last run in KLayout (VIEW_RUN_DIR=)
 		--manual-pdk \
 		--last-run \
 		--flow OpenInKLayout
+
+# ==============================================================================
+# AION flow handler
+#
+# The seven-step chain that turns the RTL into a chip built from AI-generated
+# standard cells. Each step is runnable on its own and writes under flow/;
+# flow/coherence.json records what ran when, so a re-run of an early step
+# shows up as STALE downstream instead of quietly producing a chip that mixes
+# results from two different inputs.
+#
+#   make flow                    every step
+#   make flow STEP=3             one step  (also 'STEP=2..5')
+#   make flow STEP=6 FLOW_ARGS=--draw=auto
+#   make flow-status             the coherence table
+#
+# ./flow.py is the same thing with a nicer command line.
+# ==============================================================================
+STEP      ?=
+FLOW_ARGS ?=
+
+flow: ## Run the AION flow (STEP=<n|range>, FLOW_ARGS=<extra flags>)
+	@$(PYTHON) $(PROJECT_ROOT)/flow.py $(STEP) $(FLOW_ARGS)
+
+flow-status: ## Per-step timestamps and staleness
+	@$(PYTHON) $(PROJECT_ROOT)/flow.py status
+
+flow-list: ## List the flow steps
+	@$(PYTHON) $(PROJECT_ROOT)/flow.py --list
 
 # ------------------------------------------------------------------------------
 # Utils targets

@@ -48,16 +48,26 @@ def netlist(stage):
 
 
 # name, make target, make variables, timing?, what must exist first
+#
+# The netlist directories are the flow's step directories: 1_synth is
+# `./flow.py 1`, 3_rewrite is step 3, 7_pnr is step 7. pnr_simple is the
+# PDK-only baseline and belongs to `make pnr_simple`, not to a flow step.
+# A stage whose netlist is absent is skipped, so this table covers the AI
+# stages too without failing on a repo that has only run the baseline.
 STAGES = [
     ("RTL (GHDL)", "sim", {}, False, None),
     ("Post-synth (Verilator)", "post_synth_sim", {"TOOL": "verilator"}, False,
-     netlist("synth")),
+     netlist("1_synth")),
     ("Post-synth (Icarus)", "post_synth_sim", {"TOOL": "icarus"}, False,
-     netlist("synth")),
+     netlist("1_synth")),
+    ("Post-synth AI (Verilator)", "post_synth_sim_ai", {"TOOL": "verilator"},
+     False, netlist("3_rewrite")),
     ("Post-PnR (Verilator)", "post_pnr_sim", {"TOOL": "verilator"}, False,
      netlist("pnr_simple")),
     ("Post-PnR (Icarus + SDF)", "post_pnr_sim", {"TOOL": "icarus"}, True,
      netlist("pnr_simple")),
+    ("Post-PnR AI (Icarus + SDF)", "post_pnr_sim_ai", {"TOOL": "icarus"}, True,
+     netlist("7_pnr")),
 ]
 
 EMPTY = {"total": 0, "pass": 0, "fail": 0, "skip": 0}
