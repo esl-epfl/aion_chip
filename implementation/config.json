@@ -37,7 +37,7 @@
   "GHDL_ARGUMENTS": "--std=08 -fsynopsys -fexplicit",
 
   "CLOCK_PORT": "clk",
-  "CLOCK_PERIOD": 20,
+  "CLOCK_PERIOD": 50,
 
   "TIMING_VIOLATION_CORNERS": ["*"],
   "SETUP_VIOLATION_CORNERS": ["*"],

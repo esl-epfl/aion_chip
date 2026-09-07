@@ -44,6 +44,16 @@ because none of them fail until detailed placement otherwise:
 - height exactly `3.78` um (one `CoreSite` row)
 - width an exact multiple of `0.48` um (the `CoreSite` pitch)
 - `PIN VDD` and `PIN VSS` present, so the PDN can strap it
+- every signal pin covers a routing track — a `Metal1` port must contain a
+  `y = n * 0.42` um line, a `Metal2` port an `x = n * 0.48` um line
+  (`tracks.info`, and `DIRECTION` in `sg13g2_tech.lef`)
+
+That last one is the only one that survives placement. A pin off the track
+grid places and globally routes without complaint, then aborts the whole
+design in detailed routing with `DRT-0073 No access point` — a hard abort in
+pin access, which `LENIENT=1` does not downgrade. `scripts/collect_cells.py`
+grades it before PnR starts, and `make export` refuses to publish a cell that
+fails it. All 283 signal pins of the PDK `sg13g2_stdcell` library pass.
 
 ## Why the cells are *not* don't-touch
 

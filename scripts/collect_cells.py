@@ -14,6 +14,7 @@
 # ================================================================
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -53,6 +54,25 @@ SITE_NAME = "CoreSite"
 SITE_WIDTH = 0.48
 SITE_HEIGHT = 3.78
 GEOMETRY_TOLERANCE = 1e-6
+
+# Routing tracks, from libs.tech/librelane/sg13g2_stdcell/tracks.info:
+# every Metal has X lines at n * 0.48 um and Y lines at n * 0.42 um.
+TRACK_PITCH = {"x": 0.48, "y": 0.42}
+TRACK_OFFSET = {"x": 0.0, "y": 0.0}
+
+# Routing layer -> the axis whose track lines a pin on it must cover, from
+# DIRECTION in sg13g2_tech.lef. A wire runs along its layer's preferred
+# direction, so it stops anywhere on that axis but is pinned to a track on the
+# other: a HORIZONTAL layer routes along y = n * 0.42, a VERTICAL one along
+# x = n * 0.48. A pin covering no such line has nothing for a wire to land on.
+ROUTING_AXIS = {
+    "Metal1": "y",      # HORIZONTAL
+    "Metal2": "x",      # VERTICAL
+    "Metal3": "y",      # HORIZONTAL
+    "Metal4": "x",      # VERTICAL
+    "Metal5": "y",      # HORIZONTAL
+}
+TRACK_TOLERANCE = 5e-4
 
 
 @dataclass
@@ -107,6 +127,79 @@ def collect_cells(cells_dir: str) -> List[Cell]:
 # mistakes an LLM-generated abstract actually makes.
 # ------------------------------------------------------------------
 MACRO_RE = re.compile(r"^\s*MACRO\s+(\S+)", re.MULTILINE)
+PIN_BLOCK_RE = re.compile(
+    r"^[ \t]*PIN[ \t]+(\S+)[ \t]*$(.*?)^[ \t]*END[ \t]+\1[ \t]*$",
+    re.MULTILINE | re.DOTALL,
+)
+LAYER_RE = re.compile(r"^\s*LAYER\s+(\S+)\s*;")
+RECT_RE = re.compile(
+    r"^\s*RECT\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+"
+    r"([0-9.eE+-]+)\s+([0-9.eE+-]+)\s*;"
+)
+USE_RE = re.compile(r"^\s*USE\s+(\S+)\s*;", re.MULTILINE)
+
+
+def covers_track(lo: float, hi: float, axis: str) -> bool:
+    """True when the span [lo, hi] contains a routing track line on axis."""
+    offset, pitch = TRACK_OFFSET[axis], TRACK_PITCH[axis]
+    n = math.ceil((lo - offset) / pitch - TRACK_TOLERANCE / pitch)
+    return offset + n * pitch <= hi + TRACK_TOLERANCE
+
+
+def check_pin_access(macro: str, body: str) -> List[str]:
+    """Every signal pin must give the router a track line to land on.
+
+    This is the static half of TritonRoute's pin access: necessary, not
+    sufficient. It is the half an abstract drawn without the track grid in
+    mind fails, and it is worth a second here because DRT-0073 is a hard abort
+    in detailed routing an hour into the flow, not a DRC that LENIENT=1 can
+    downgrade. All 283 signal pins of the PDK sg13g2_stdcell library pass it.
+    """
+    problems = []
+    for pin, pin_body in PIN_BLOCK_RE.findall(body):
+        use = USE_RE.search(pin_body)
+        if use is not None and use.group(1).upper() in ("POWER", "GROUND"):
+            continue
+        if use is None and pin.upper() in ("VDD", "VSS"):
+            continue
+
+        layers, hit = [], False
+        layer = None
+        for line in pin_body.splitlines():
+            layer_match = LAYER_RE.match(line)
+            if layer_match is not None:
+                layer = layer_match.group(1)
+                if layer in ROUTING_AXIS and layer not in layers:
+                    layers.append(layer)
+                continue
+            rect = RECT_RE.match(line)
+            if rect is None or layer not in ROUTING_AXIS:
+                continue
+            x1, y1, x2, y2 = (float(v) for v in rect.groups())
+            axis = ROUTING_AXIS[layer]
+            lo, hi = (y1, y2) if axis == "y" else (x1, x2)
+            if covers_track(min(lo, hi), max(lo, hi), axis):
+                hit = True
+                break
+        if hit:
+            continue
+
+        if not layers:
+            problems.append(
+                f"{macro}: PIN {pin} has no geometry on a routing layer, "
+                "so the router cannot reach it"
+            )
+        else:
+            where = ", ".join(
+                f"{lay} routes along {ROUTING_AXIS[lay]} = n * "
+                f"{TRACK_PITCH[ROUTING_AXIS[lay]]}um"
+                for lay in layers
+            )
+            problems.append(
+                f"{macro}: PIN {pin} covers no routing track ({where}). "
+                "Detailed routing aborts with 'DRT-0073 No access point'"
+            )
+    return problems
 
 
 def check_lef(path: str) -> List[str]:
@@ -165,6 +258,8 @@ def check_lef(path: str) -> List[str]:
             if not re.search(rf"^\s*PIN\s+{pin}\s*$", body, re.MULTILINE):
                 problems.append(f"{macro}: no {pin} PIN — the PDN cannot connect it")
 
+        problems.extend(check_pin_access(macro, body))
+
     return problems
 
 
@@ -185,6 +280,7 @@ def check_cells(cells_dir: str, strict: bool) -> int:
 
     errors = 0
     warnings = 0
+    all_problems: List[str] = []
 
     print(f"Custom cells under {cells_dir}/:")
     for cell in cells:
@@ -201,6 +297,7 @@ def check_cells(cells_dir: str, strict: bool) -> int:
         if "lef" in cell.views:
             for problem in check_lef(cell.views["lef"]):
                 print(f"    ERROR   {problem}")
+                all_problems.append(problem)
                 errors += 1
         if "lib" in cell.views:
             for problem in check_lib(cell.views["lib"], cell.name):
@@ -209,15 +306,37 @@ def check_cells(cells_dir: str, strict: bool) -> int:
 
     print(f"{len(cells)} cell(s), {errors} error(s), {warnings} warning(s)")
 
+    # LENIENT=1 downgrades LibreLane's checkers. It does not downgrade this
+    # one: DRT-0073 is a hard abort inside TritonRoute's pin access, so a cell
+    # that fails the track rule takes the run down whatever this gate does.
+    # Saying "rerun with LENIENT=1" to someone holding one would be a lie.
+    unroutable = errors and any(
+        "covers no routing track" in problem or "no geometry on a routing layer" in problem
+        for problem in all_problems
+    )
+
     if errors and strict:
-        print(
-            "Refusing to run PnR with malformed cells. Fix them, or rerun with "
-            "LENIENT=1 to push through.",
-            file=sys.stderr,
-        )
+        if unroutable:
+            print(
+                "Refusing to run PnR: a pin above has nothing for the router "
+                "to land on, and detailed routing will abort with DRT-0073. "
+                "LENIENT=1 does not downgrade that — redraw the cell.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Refusing to run PnR with malformed cells. Fix them, or rerun "
+                "with LENIENT=1 to push through.",
+                file=sys.stderr,
+            )
         return 1
     if errors:
         print("LENIENT=1: continuing despite the errors above.")
+        if unroutable:
+            print(
+                "  note: the pin access errors are not downgradable. Detailed "
+                "routing will still abort with DRT-0073."
+            )
     return 0
 
 

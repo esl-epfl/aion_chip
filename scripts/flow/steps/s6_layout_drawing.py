@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from collect_cells import check_lef
+
 from .. import agent, paths
 from ..coherence import BLOCKED
 from ..config import Config
@@ -479,6 +481,17 @@ class LayoutDrawingStep(Step):
             fail(f"{cell}: {len(libs)} Liberty files exported. `make pnr` "
                  "groups views by file stem, so per-corner libs become "
                  "phantom cells. Re-run with LAYOUT_CORNERS=typ.")
+            return False
+
+        # The exporter grades the abstract too, and a cell that fails there
+        # arrives as a .rejected above. This re-grades it on the host, because
+        # publishing is the last moment a bad abstract is cheap: past here it
+        # survives placement and kills detailed routing an hour into step 7.
+        problems = check_lef(str(views[".lef"]))
+        if problems:
+            fail(f"{cell}: cannot publish, the LEF would fail PnR")
+            for problem in problems:
+                note(f"  {problem}")
             return False
 
         target = paths.CELLS_DIR / cell

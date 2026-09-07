@@ -44,6 +44,8 @@ REG_RESULT_LO = 5
 REG_RESULT_HI = 6
 REG_STATUS = 7
 
+CLK_PERIOD_NS = 50
+
 
 async def reset(dut):
     dut.rst_n.value = 0
@@ -181,7 +183,7 @@ async def _run_bitwise_tests(dut, op_a_list, op_b_list, op_name):
 @cocotb.test()
 async def test_posit_fixed_int_add(dut):
     """Test Posit16 fixed integer addition"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -194,7 +196,7 @@ async def test_posit_fixed_int_add(dut):
 @cocotb.test()
 async def test_posit_fixed_int_mult(dut):
     """Test Posit16 fixed integer multiplication"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -207,7 +209,7 @@ async def test_posit_fixed_int_mult(dut):
 @cocotb.test()
 async def test_posit_fixed_float_add(dut):
     """Test Posit16 fixed float addition"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -220,7 +222,7 @@ async def test_posit_fixed_float_add(dut):
 @cocotb.test()
 async def test_posit_fixed_float_mult(dut):
     """Test Posit16 fixed float multiplication"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -233,7 +235,7 @@ async def test_posit_fixed_float_mult(dut):
 @cocotb.test()
 async def test_posit_fixed_int_compare(dut):
     """Test Posit16 fixed integer comparisons through register interface"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -244,7 +246,7 @@ async def test_posit_fixed_int_compare(dut):
 @cocotb.test()
 async def test_posit_fixed_int_bitwise(dut):
     """Test Posit16 fixed integer bitwise ops through register interface"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -255,7 +257,7 @@ async def test_posit_fixed_int_bitwise(dut):
 @cocotb.test()
 async def test_posit_random_add_mult(dut):
     """Test Posit16 random addition and multiplication"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -295,7 +297,7 @@ async def test_posit_random_add_mult(dut):
 @cocotb.test()
 async def test_posit_random_compare(dut):
     """Test Posit16 random comparisons through register interface"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
@@ -313,7 +315,7 @@ async def test_posit_random_compare(dut):
 @cocotb.test()
 async def test_posit_random_bitwise(dut):
     """Test Posit16 random bitwise ops through register interface"""
-    clock = Clock(dut.clk, 20, unit="ns")
+    clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
