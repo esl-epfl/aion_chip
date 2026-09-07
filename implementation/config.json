@@ -69,8 +69,24 @@
     "synth": {},
 
     "pnr": {
-      "//": "PnR from a pre-existing netlist that may instantiate AI-generated cells.",
-      "RSZ_DONT_TOUCH_RX": "^_AION_.*"
+      "//": [
+        "PnR from a pre-existing netlist that may instantiate AI-generated cells.",
+        "",
+        "RSZ_DONT_TOUCH_RX is deliberately left at its default ('$^', matches",
+        "nothing). Setting it to '^_AION_.*' marks every AI cell instance",
+        "don't-touch, and OpenROAD then refuses to insert a fanout buffer in",
+        "front of ANY of their input pins -- repair_design aborts with",
+        "RSZ-3006 on the first high-fanout net that feeds one. 46 of the",
+        "netlist's 65 nets with fanout > MAX_FANOUT_CONSTRAINT drive an AI",
+        "cell, so this is not a net the flow can route around.",
+        "",
+        "The cells do not need the protection: their liberty functions are",
+        "4-input fusions with no equivalent in sg13g2, so the resizer has",
+        "nothing to swap them for, they are neither buffers nor inverters, and",
+        "DESIGN_REPAIR_REMOVE_BUFFERS is false. Confirm they survived by",
+        "grepping the hardened netlist -- flow/7_pnr/nl/tt_um_aion.nl.v --",
+        "for the AION_ masters after a run."
+      ]
     },
 
     "pnr_simple": {},

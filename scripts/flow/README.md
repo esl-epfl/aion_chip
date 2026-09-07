@@ -272,7 +272,7 @@ to manual.
 | `MAX_OUTPUTS` | `1` | 2, 3 | boundary outputs per pattern (`None` = no limit) |
 | `MAX_INPUTS` | `5` | 2, 3 | boundary inputs per pattern (`None` = no limit) |
 | `JOBS` | `None` | 2, 3 | mining workers (`None` = every core) |
-| `CELL_PREFIX` | `AION_` | 2, 3 | prefix of every generated module. **Change this and you must change `RSZ_DONT_TOUCH_RX` in `implementation/config.json` with it**, or PnR's resizer will buffer your cells away. |
+| `CELL_PREFIX` | `AION_` | 2, 3 | prefix of every generated module (the rewriter emits `_AION_` as the instance prefix). |
 | `ELITE_COUNT` | `5` | 2 | size of the elite library (`None` = keep every cell) |
 | `ELITE_METRIC` | `saved-area` | 2 | `saved-area`, `occurrences` or `saved-area-per-cell` |
 | `REWRITE_CELLS` | `elite` | 3 | `elite`, `all`, or a path to a hand-curated `.v` |
@@ -361,12 +361,13 @@ simulation silently elaborated with the wrong models and Verilator hung at
 0 ns. FuseSoC skips any tree containing a file with this name. **It is
 untracked in the submodule; commit it there so a fresh clone has it.**
 
-**`implementation/config.json` → `RSZ_DONT_TOUCH_RX`** — was `^aion_.*`, which
-matched nothing: the regex matches *instance* names, and `aion_opt`'s rewriter
-emits `_AION_0_` (its `_instance_prefix` turns the `AION_` cell prefix into
-`_AION_`). The resizer was therefore free to size, buffer or delete the very
-cells step 6 spends its time drawing. It is now `^_AION_.*`; change it with
-`CELL_PREFIX` if you ever change that.
+**`implementation/config.json` → `RSZ_DONT_TOUCH_RX`** — must stay at its
+default. It was once `^aion_.*`, which matched nothing (the regex matches
+*instance* names, and `aion_opt`'s rewriter emits `_AION_0_`). Correcting it
+to `^_AION_.*` made it match — and broke step 7: don't-touch on an instance
+also forbids buffering its input pins, so `repair_design` aborts with RSZ-3006
+on the first high-fanout net driving an AI cell. See `implementation/cells/README.md`
+for why the cells survive without it.
 
 ## Files
 

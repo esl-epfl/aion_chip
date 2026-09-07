@@ -45,10 +45,31 @@ because none of them fail until detailed placement otherwise:
 - width an exact multiple of `0.48` um (the `CoreSite` pitch)
 - `PIN VDD` and `PIN VSS` present, so the PDN can strap it
 
-Instances whose name matches `RSZ_DONT_TOUCH_RX` are hidden from the resizer,
-so it will not size or buffer them away. The regex matches **instance and net
-names, not cell masters** — `implementation/config.json` sets `^_AION_.*`,
-which is the instance prefix `aion_opt`'s rewriter emits (`_instance_prefix`
-turns the `AION_` cell prefix into `_AION_`). Change `CELL_PREFIX` in the flow
-and you must change this regex with it, or the resizer is free to buffer and
-resize away the cells you spent step 6 drawing.
+## Why the cells are *not* don't-touch
+
+`RSZ_DONT_TOUCH_RX` looks like the way to stop the resizer sizing away the
+cells step 6 spends its time drawing, and `implementation/config.json` used to
+set it to `^_AION_.*` (the instance prefix `aion_opt`'s rewriter emits —
+`_instance_prefix` turns the `AION_` cell prefix into `_AION_`; the regex
+matches **instance and net names, not cell masters**).
+
+It cannot be used. OpenROAD's `set_dont_touch` on an instance also forbids
+inserting a buffer in front of that instance's *input* pins, so the first
+high-fanout net that drives an AI cell aborts `repair_design`:
+
+```
+[WARNING ODB-1211] InsertBufferBeforeLoads: Load pin '_AION_129_/I2' is dont_touch.
+[ERROR RSZ-3006] Failed to insert buffer before loads for net _1984_
+```
+
+46 of the 65 nets in the hardened netlist with fanout above
+`MAX_FANOUT_CONSTRAINT` drive an AI cell, so there is nothing to route around.
+
+The protection is not needed anyway: the fused cells are 4-input functions
+with no equivalent in sg13g2, so OpenSTA finds no cell to swap them for; they
+are neither buffers nor inverters, and `DESIGN_REPAIR_REMOVE_BUFFERS` is
+false. After a run, confirm it held:
+
+```sh
+grep -c 'AION_' flow/7_pnr/nl/tt_um_aion.nl.v
+```

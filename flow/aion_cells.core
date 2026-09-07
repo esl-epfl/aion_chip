@@ -11,7 +11,7 @@ CAPI=2:
 name: epfl:aion:flow_cells:1.0.0
 description: |
   Verilog models of the AION cells flow step 6 drew and published.
-  Currently: no cell has been drawn yet -- this is the placeholder.
+  Currently: 2 drawn cell(s): AION_a21oi_nor2_1, AION_nand2_o21ai_0.
 
   The post-PnR netlist instantiates the AION cells as LEAF cells -- LibreLane
   hardens them as macros and the SDF carries one CELL entry per instance -- so
@@ -22,7 +22,8 @@ description: |
 filesets:
   models:
     files:
-      - no_aion_cells.v
+      - 6_layout_drawing/AION_a21oi_nor2_1/final/AION_a21oi_nor2_1.v
+      - 6_layout_drawing/AION_nand2_o21ai_0/final/AION_nand2_o21ai_0.v
     file_type: verilogSource
 
 targets:
