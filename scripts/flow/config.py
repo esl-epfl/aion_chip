@@ -142,7 +142,7 @@ class Config:
     DRAW_MAX_ITERS: int = 12
     DRAW_TIMEOUT: int = 1800
     DRAW_MODEL: Optional[str] = "claude-opus-5"
-    DRAW_EFFORT: Optional[str] = "high"
+    DRAW_EFFORT: Optional[str] = "low"
     # Publish a cell into implementation/cells/ even when it lost the
     # area/delay comparison against the abutted PDK baseline.
     DRAW_PUBLISH_ON_LOSS: bool = True

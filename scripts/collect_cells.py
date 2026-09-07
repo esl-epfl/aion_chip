@@ -74,6 +74,43 @@ ROUTING_AXIS = {
 }
 TRACK_TOLERANCE = 5e-4
 
+# Via landing pads, from the DEFAULT via definitions in sg13g2_tech.lef. Every
+# ViaN (N = 1..4) is a 0.19 um cut enclosed by 0.29 x 0.21 um on the metal
+# below and 0.29 x 0.20 um on the metal above, in either orientation. Covering
+# a track is not enough on its own: a port with nowhere to put that pad has
+# nowhere to put the via that brings the wire down to it, which is DRT-0073
+# just the same.
+#
+# The long side of the pad runs along the wire and may hang off the end of the
+# port onto the rest of the net -- sg13g2_nand4_1/A relies on exactly that, its
+# widest port rect being 0.275 um against a 0.29 um pad. The short side may
+# not, so 0.21 um across is the real floor.
+# Each entry is (axis of the long side, pad below w, h, pad above w, h).
+VIA_LANDING = (
+    ("x", 0.29, 0.21, 0.29, 0.20),
+    ("y", 0.21, 0.29, 0.20, 0.29),
+)
+VIA_LANDING_SHORT_SIDE = 0.21
+
+# The layer a via off a port lands on, so that the macro's own obstructions
+# there can be checked for covering it.
+LAYER_ABOVE = {
+    "Metal1": "Metal2",
+    "Metal2": "Metal3",
+    "Metal3": "Metal4",
+    "Metal4": "Metal5",
+}
+
+# Problems that mean the router has nothing to land on. LENIENT=1 does not
+# downgrade these: DRT-0073 is a hard abort inside TritonRoute's pin access,
+# not a checker LibreLane can be told to ignore.
+UNROUTABLE_MARKERS = (
+    "covers no routing track",
+    "no geometry on a routing layer",
+    "no via can land on it",
+    "every via landing is covered",
+)
+
 
 @dataclass
 class Cell:
@@ -137,6 +174,9 @@ RECT_RE = re.compile(
     r"([0-9.eE+-]+)\s+([0-9.eE+-]+)\s*;"
 )
 USE_RE = re.compile(r"^\s*USE\s+(\S+)\s*;", re.MULTILINE)
+# The obstruction block runs to the first bare END; 'END <macro>' has a token
+# after it and cannot close it by accident.
+OBS_BLOCK_RE = re.compile(r"^[ \t]*OBS[ \t]*$(.*?)^[ \t]*END[ \t]*$", re.MULTILINE | re.DOTALL)
 
 
 def covers_track(lo: float, hi: float, axis: str) -> bool:
@@ -146,15 +186,111 @@ def covers_track(lo: float, hi: float, axis: str) -> bool:
     return offset + n * pitch <= hi + TRACK_TOLERANCE
 
 
+def layer_rects(block: str):
+    """Every RECT in a PORT or OBS block, as (layer, x1, y1, x2, y2)."""
+    layer = None
+    for line in block.splitlines():
+        layer_match = LAYER_RE.match(line)
+        if layer_match is not None:
+            layer = layer_match.group(1)
+            continue
+        rect = RECT_RE.match(line)
+        if rect is None or layer is None:
+            continue
+        x1, y1, x2, y2 = (float(v) for v in rect.groups())
+        yield layer, min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+
+
+def region_covered(box, blockers) -> bool:
+    """True when every point of the closed rectangle box lies in some blocker.
+
+    Coordinate compression: the box is cut at every blocker edge that falls
+    inside it, and one point per resulting cell decides that whole cell. box
+    can be degenerate -- a port rect that a landing pad fits exactly leaves a
+    line or a single point to place the via centre on.
+    """
+    x1, y1, x2, y2 = box
+    xs = sorted({x1, x2} | {min(max(v, x1), x2) for b in blockers for v in (b[0], b[2])})
+    ys = sorted({y1, y2} | {min(max(v, y1), y2) for b in blockers for v in (b[1], b[3])})
+    at_x = [(xs[i] + xs[i + 1]) / 2 for i in range(len(xs) - 1)] or [x1]
+    at_y = [(ys[i] + ys[i + 1]) / 2 for i in range(len(ys) - 1)] or [y1]
+    return all(
+        any(b[0] <= px <= b[2] and b[1] <= py <= b[3] for b in blockers)
+        for px in at_x
+        for py in at_y
+    )
+
+
+def centre_span(lo: float, hi: float, pad: float, may_spill: bool):
+    """Where a pad of this size may be centred within [lo, hi], or None.
+
+    A pad that does not fit still lands when it is the long side that runs
+    over, because it runs over onto the rest of the net -- but only as far as
+    the short side, past which there is no port left to sit on.
+    """
+    if hi - lo >= pad - GEOMETRY_TOLERANCE:
+        return lo + pad / 2, hi - pad / 2
+    if may_spill and hi - lo >= VIA_LANDING_SHORT_SIDE - GEOMETRY_TOLERANCE:
+        centre = (lo + hi) / 2
+        return centre, centre
+    return None
+
+
+def check_via_landing(rect, obstructions) -> str:
+    """Whether a via can land on one port rect: 'ok', 'nofit' or 'blocked'.
+
+    'nofit' -- the rect is under 0.21um across, so no via can be placed on it
+    however well it sits on the grid. 'blocked' -- a pad fits, but the macro's
+    own obstructions on the layer above cover every position the via centre
+    could take. That second one is what `magic lef write -pinonly` produces
+    when a cell routes its output up to Metal2 and only labels the Metal1 end:
+    the strap the pin needs is exported as an obstruction sitting on the pin.
+    """
+    layer, x1, y1, x2, y2 = rect
+    if layer not in LAYER_ABOVE:          # topmost routing layer, nothing above
+        return "ok"
+    above = [b for b in obstructions if b[0] == LAYER_ABOVE[layer]]
+    fits = False
+    for long_axis, below_w, below_h, above_w, above_h in VIA_LANDING:
+        span_x = centre_span(x1, x2, below_w, long_axis == "x")
+        span_y = centre_span(y1, y2, below_h, long_axis == "y")
+        if span_x is None or span_y is None:
+            continue
+        fits = True
+        # Where the via centre may sit for the pad below to stay on the port,
+        # against where it may not for the pad above to clear an obstruction.
+        centres = (span_x[0], span_y[0], span_x[1], span_y[1])
+        blocked = [
+            (bx1 - above_w / 2, by1 - above_h / 2, bx2 + above_w / 2, by2 + above_h / 2)
+            for _, bx1, by1, bx2, by2 in above
+        ]
+        if not region_covered(centres, blocked):
+            return "ok"
+    return "blocked" if fits else "nofit"
+
+
 def check_pin_access(macro: str, body: str) -> List[str]:
-    """Every signal pin must give the router a track line to land on.
+    """Every signal pin must give the router somewhere to land.
+
+    Three things have to hold, and a drawn-by-hand abstract gets each of them
+    wrong in a different way:
+
+      * the port has geometry on a routing layer at all;
+      * it covers a track line, so a wire can run onto it;
+      * a via can land on it -- the port is at least one landing pad wide, and
+        the macro's own obstructions on the layer above do not sit on top of
+        the pad.
 
     This is the static half of TritonRoute's pin access: necessary, not
-    sufficient. It is the half an abstract drawn without the track grid in
-    mind fails, and it is worth a second here because DRT-0073 is a hard abort
-    in detailed routing an hour into the flow, not a DRC that LENIENT=1 can
-    downgrade. All 283 signal pins of the PDK sg13g2_stdcell library pass it.
+    sufficient, because it cannot see the neighbouring instances. It is worth
+    a second here because DRT-0073 is a hard abort in detailed routing an hour
+    into the flow, not a DRC that LENIENT=1 can downgrade. All 283 signal pins
+    of the PDK sg13g2_stdcell library pass all three (the tightest is
+    sg13g2_inv_1/Y at 0.23um, against the 0.21um landing pad).
     """
+    obs_block = OBS_BLOCK_RE.search(body)
+    obstructions = list(layer_rects(obs_block.group(1))) if obs_block else []
+
     problems = []
     for pin, pin_body in PIN_BLOCK_RE.findall(body):
         use = USE_RE.search(pin_body)
@@ -163,33 +299,33 @@ def check_pin_access(macro: str, body: str) -> List[str]:
         if use is None and pin.upper() in ("VDD", "VSS"):
             continue
 
-        layers, hit = [], False
-        layer = None
+        layers = []
         for line in pin_body.splitlines():
             layer_match = LAYER_RE.match(line)
-            if layer_match is not None:
-                layer = layer_match.group(1)
-                if layer in ROUTING_AXIS and layer not in layers:
-                    layers.append(layer)
+            if layer_match is None:
                 continue
-            rect = RECT_RE.match(line)
-            if rect is None or layer not in ROUTING_AXIS:
-                continue
-            x1, y1, x2, y2 = (float(v) for v in rect.groups())
-            axis = ROUTING_AXIS[layer]
-            lo, hi = (y1, y2) if axis == "y" else (x1, x2)
-            if covers_track(min(lo, hi), max(lo, hi), axis):
-                hit = True
-                break
-        if hit:
-            continue
+            layer = layer_match.group(1)
+            if layer in ROUTING_AXIS and layer not in layers:
+                layers.append(layer)
 
         if not layers:
             problems.append(
                 f"{macro}: PIN {pin} has no geometry on a routing layer, "
                 "so the router cannot reach it"
             )
-        else:
+            continue
+
+        ports = [rect for rect in layer_rects(pin_body) if rect[0] in ROUTING_AXIS]
+
+        on_track = False
+        for layer, x1, y1, x2, y2 in ports:
+            axis = ROUTING_AXIS[layer]
+            lo, hi = (y1, y2) if axis == "y" else (x1, x2)
+            if covers_track(lo, hi, axis):
+                on_track = True
+                break
+
+        if not on_track:
             where = ", ".join(
                 f"{lay} routes along {ROUTING_AXIS[lay]} = n * "
                 f"{TRACK_PITCH[ROUTING_AXIS[lay]]}um"
@@ -198,6 +334,30 @@ def check_pin_access(macro: str, body: str) -> List[str]:
             problems.append(
                 f"{macro}: PIN {pin} covers no routing track ({where}). "
                 "Detailed routing aborts with 'DRT-0073 No access point'"
+            )
+            continue
+
+        landings = [check_via_landing(rect, obstructions) for rect in ports]
+        if "ok" in landings:
+            continue
+
+        if "blocked" in landings:
+            above = ", ".join(
+                dict.fromkeys(LAYER_ABOVE[lay] for lay in layers if lay in LAYER_ABOVE)
+            )
+            problems.append(
+                f"{macro}: PIN {pin} is big enough for a via, but every via "
+                f"landing is covered by the macro's own OBS on {above}. If "
+                "that obstruction is the pin's own metal, label it as part of "
+                "the port instead. Detailed routing aborts with "
+                "'DRT-0073 No access point'"
+            )
+        else:
+            problems.append(
+                f"{macro}: PIN {pin} is under 0.21um in one direction, so "
+                "no via can land on it (the smallest ViaN pad is 0.29 x "
+                "0.21um). Covering a track is not enough on its own -- "
+                "detailed routing aborts with 'DRT-0073 No access point'"
             )
     return problems
 
@@ -306,13 +466,14 @@ def check_cells(cells_dir: str, strict: bool) -> int:
 
     print(f"{len(cells)} cell(s), {errors} error(s), {warnings} warning(s)")
 
-    # LENIENT=1 downgrades LibreLane's checkers. It does not downgrade this
-    # one: DRT-0073 is a hard abort inside TritonRoute's pin access, so a cell
-    # that fails the track rule takes the run down whatever this gate does.
+    # LENIENT=1 downgrades LibreLane's checkers. It does not downgrade these:
+    # DRT-0073 is a hard abort inside TritonRoute's pin access, so a cell that
+    # fails a pin access rule takes the run down whatever this gate does.
     # Saying "rerun with LENIENT=1" to someone holding one would be a lie.
     unroutable = errors and any(
-        "covers no routing track" in problem or "no geometry on a routing layer" in problem
+        marker in problem
         for problem in all_problems
+        for marker in UNROUTABLE_MARKERS
     )
 
     if errors and strict:
