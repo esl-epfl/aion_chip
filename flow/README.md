@@ -1,6 +1,6 @@
 # Flow output
 
-Everything the seven flow steps produce. One directory per step, numbered in
+Everything the nine flow steps produce. One directory per step, numbered in
 the order they run, each wiped and rewritten in full by the step that owns it:
 
 ```
@@ -20,7 +20,12 @@ logs/<step>/            one file per command the handler ran   (git-ignored)
 5_gate_minimization/    one CMOS stack per cell          (git-ignored)
 6_layout_drawing/       drawn cells and their views      (git-ignored)
 7_pnr/                  the hardened chip                (git-ignored)
+8_render/               PNGs of the die and its AION cells (git-ignored)
+9_report/               AION vs the baseline: report.md,   (git-ignored)
+                        report.json and a standalone report.html
 pnr_simple/             the PDK-only baseline            (git-ignored)
+                        not a step -- `make pnr_simple` builds it, and
+                        step 9 is the only thing that reads it
 ```
 
 The inputs live in `../implementation/`: the config template, the SDC, the pin

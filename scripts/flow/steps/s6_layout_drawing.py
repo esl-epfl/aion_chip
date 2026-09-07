@@ -511,8 +511,37 @@ class LayoutDrawingStep(Step):
         ok(f"{cell}: published {len(copied)} view(s) to "
            f"{paths.rel_to_project(target)}")
         note("  " + "  ".join(copied))
+
+        png = self._render(cell, views[".gds"], target)
+        if png is not None:
+            note(f"  {png.name} — layout, footprint and layer legend")
+
         ctx.note(f"{cell} published to implementation/cells/{cell}/")
         return True
+
+    # -----------------------------------------------------------------
+    def _render(self, cell: str, gds: Path, target: Path) -> Optional[Path]:
+        """Draw the published cell to a PNG beside its views.
+
+        Documentation, not a view: `make pnr` discovers cells by file stem and
+        does not recognise `.png`, so this cannot become a phantom cell or a
+        missing-view error. It is also never allowed to fail a publish -- the
+        views are the deliverable and the picture is not, so a host without
+        klayout or Pillow publishes the cell and says why there is no image.
+        """
+        try:
+            from gds_to_image import render_gds
+        except ImportError as exc:
+            warn(f"{cell}: no layout PNG, {exc}")
+            return None
+
+        png = target / f"{cell}.png"
+        try:
+            render_gds(str(gds), str(png), title=cell)
+        except Exception as exc:            # noqa: BLE001 - see the docstring
+            warn(f"{cell}: could not render {png.name} — {exc}")
+            return None
+        return png
 
     # -----------------------------------------------------------------
     def _verify_pex(self, ctx: Context, cell: str, build: Path,

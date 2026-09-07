@@ -17,6 +17,8 @@ flow/4_characterization/
 flow/5_gate_minimization/
 flow/6_layout_drawing/
 flow/7_pnr/
+flow/8_render/
+flow/9_report/
 flow/pnr_simple/
 flow/logs/
 flow/coherence.json

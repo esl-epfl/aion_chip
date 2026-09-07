@@ -393,7 +393,7 @@ klayout: ## Open the last run in KLayout (VIEW_RUN_DIR=)
 # ==============================================================================
 # AION flow handler
 #
-# The seven-step chain that turns the RTL into a chip built from AI-generated
+# The nine-step chain that turns the RTL into a chip built from AI-generated
 # standard cells. Each step is runnable on its own and writes under flow/;
 # flow/coherence.json records what ran when, so a re-run of an early step
 # shows up as STALE downstream instead of quietly producing a chip that mixes

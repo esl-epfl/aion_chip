@@ -40,6 +40,8 @@ steps
   5  5_gate_minimization   one CMOS stack per cell, proved in SPICE
   6  6_layout_drawing      draw, verify and publish the cell views
   7  7_pnr                 place and route + post-PnR simulation
+  8  8_render              draw the die and mark the AION cells
+  9  9_report              compare the chip against the PDK-only baseline
 
 examples
   python flow.py                          the whole chain

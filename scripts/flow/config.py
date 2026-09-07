@@ -158,6 +158,37 @@ class Config:
     PNR_SIM_TOOL: str = "icarus"
 
     # =====================================================================
+    # 8_render
+    # =====================================================================
+    # RENDER_WIDTH       width of every image, in pixels. The header and the
+    #                    legend are carved out of it, so this is the size of
+    #                    the file you get, not of the layout inside it.
+    # RENDER_HEIGHT      None = fit the die's aspect ratio, which is what
+    #                    keeps a 660x210 um die from being letterboxed into
+    #                    a strip. Set it only to force a particular size.
+    # RENDER_ZOOM_SITES  width of the per-cell close-up, in placement sites
+    #                    (0.48 um each). 32 sites is ~15 um: the cell plus
+    #                    three or four neighbours on either side.
+    RENDER_WIDTH: int = 2400
+    RENDER_HEIGHT: Optional[int] = None
+    RENDER_ZOOM_SITES: int = 32
+
+    # =====================================================================
+    # 9_report
+    # =====================================================================
+    # The report compares flow/7_pnr against flow/pnr_simple -- the same RTL
+    # hardened through the same config with the PDK standard cells only. That
+    # control is not a flow step; `make pnr_simple` builds it.
+    #
+    # REPORT_RUN_BASELINE      harden the baseline when there is none on disk
+    #                          (needs the container, ~10 min). Off means the
+    #                          step fails and tells you to run it yourself.
+    # REPORT_REBUILD_BASELINE  re-harden it even when one exists. For when the
+    #                          RTL moved under a baseline from an older run.
+    REPORT_RUN_BASELINE: bool = True
+    REPORT_REBUILD_BASELINE: bool = False
+
+    # =====================================================================
     # Runner behaviour
     # =====================================================================
     # Per-command wall clock, seconds. Characterization is the long pole.

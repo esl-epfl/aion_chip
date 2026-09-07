@@ -58,6 +58,8 @@ STEP_DIRS = {
     "5_gate_minimization": FLOW_DIR / "5_gate_minimization",
     "6_layout_drawing": FLOW_DIR / "6_layout_drawing",
     "7_pnr": FLOW_DIR / "7_pnr",
+    "8_render": FLOW_DIR / "8_render",
+    "9_report": FLOW_DIR / "9_report",
 }
 
 COHERENCE_FILE = FLOW_DIR / "coherence.json"

@@ -62,6 +62,8 @@ halfway through a step.
 | 5 | `5_gate_minimization` | re-implement each cell as one CMOS stack, proved in SPICE | seconds–minutes |
 | 6 | `6_layout_drawing` | draw, verify, characterize and publish each cell's views | minutes–hours |
 | 7 | `7_pnr` | harden the netlist with those cells, then simulate with SDF | ~10 min |
+| 8 | `8_render` | draw the hardened die and mark where the AION cells landed | ~1 s |
+| 9 | `9_report` | compare the chip against the PDK-only baseline | ~1 s + baseline |
 
 Every step reads only what it declares, writes only under its own directory
 (step 6 also publishes into `implementation/cells/`), and never assumes an
@@ -83,6 +85,10 @@ flow/
   5_gate_minimization/ raw_spice/  minimized_spice/
   6_layout_drawing/   <CELL>/{drc,lvs,pex,char,baseline,final}/
   7_pnr/              nl/ sdf/ gds/ def/ reports/ metrics.json
+  8_render/           <TOP>.chip.png  <TOP>.aion.png  <TOP>.<CELL>.png
+                      render.json
+  9_report/           report.md  report.json  report.html
+  pnr_simple/         the PDK-only control step 9 measures against
   pnr_simple/         the PDK-only baseline (make pnr_simple, not a step)
 ```
 
@@ -216,6 +222,103 @@ abutted PDK cells it replaces) is a real result, not an error — the views are
 complete either way, and the cell is still published unless you set
 `DRAW_PUBLISH_ON_LOSS=false`.
 
+## Step 8, the only picture the flow draws
+
+Seven steps turn RTL into a GDS and report it as numbers — utilization, worst
+slack, DRC count. None of them ever shows the thing, and none of them answers
+the question the whole flow exists to ask: *where did the AI cells actually
+end up?* `metrics.json` does not carry it. Step 8 does, in three pictures:
+
+```
+flow/8_render/
+  tt_um_aion.chip.png              the die, every layer, AION instances ringed
+  tt_um_aion.aion.png              the placement map: AION vs PDK logic vs fill
+  tt_um_aion.<CELL>.png            one instance of each AION cell, up close
+  render.json                      the same numbers, machine-readable
+```
+
+`.chip.png` is the layout as drawn, coloured as a spectrum by metal level —
+blue at Metal1 up to violet at TopMetal2 — with a ring around every AION
+instance. `.aion.png` throws the layout away and draws the placement instead:
+every occupied site, coloured by what stands on it, which is the picture that
+actually shows the AI cells scattered through the core. `.<CELL>.png` zooms to
+one instance abutted to its PDK neighbours, with everything above Metal1
+outlined rather than filled — solid, a TopMetal2 power rail is an opaque band
+across the very cell the picture exists to show.
+
+The layout itself is drawn by klayout's own renderer (`klayout.lay`,
+offscreen: no Qt display, no container) and Pillow adds the header, the legend
+and the overlay; `render_chip.py` is also a plain CLI, so any GDS can be
+rendered without the flow:
+
+```bash
+python scripts/render_chip.py flow/7_pnr/gds/tt_um_aion.gds /tmp/render
+```
+
+Nothing downstream reads what this step writes, so it is the one step that
+cannot break a chip. It is also the one step that costs a second.
+
+## Step 9, the question the flow exists to ask
+
+Eight steps mine cells, prove them, draw them, harden a chip out of them and
+photograph it. None of them ever says whether the result is *better*. Step 9
+does, against a control:
+
+```
+flow/pnr_simple/     the same RTL, the same config, PDK standard cells only
+flow/7_pnr/          the same RTL, with the AI cells substituted in
+```
+
+Same die, same SDC, same synthesis strategy, same PDK — the substitution is
+the only variable, so the deltas are attributable to it. The step refuses to
+compare two runs whose `resolved.json` disagree on any of `DIE_AREA`,
+`CORE_AREA`, `CLOCK_PERIOD`, `FP_SIZING`, `PL_TARGET_DENSITY_PCT`,
+`SYNTH_STRATEGY`, `PDK` or `STD_CELL_LIBRARY`: a delta that mixes the cells
+with a config change is worse than no delta.
+
+The baseline is **not a flow step** — nothing downstream consumes it. `make
+pnr_simple` builds it, and step 9 runs that itself when `flow/pnr_simple/` is
+missing (`REPORT_RUN_BASELINE`, ~10 min, needs the container) and reuses it
+when it is not. That is the only part of this step that costs anything.
+
+`flow/9_report/` carries the same comparison three ways — `report.md` to read
+in a terminal, `report.json` for anything downstream, and `report.html` to look
+at. The page is self-contained (inline CSS, inline SVG, no CDN), drawn on the
+same `#18181c` panel the cell and die renders use, and it embeds step 8's
+images when they exist. Two comparisons, and the second is the one worth
+reading:
+
+1. **The chip.** Standard cell area, utilization, setup and hold slack per
+   corner, power, wirelength, DRC, LVS, antenna — AION against baseline, each
+   with a direction of "better" and a win/loss/tie under a 0.5% tie band,
+   because placement is a seeded heuristic and a re-run moves the small
+   numbers by about that much on its own.
+2. **The promise against the delivery.** Step 3 predicts an area saving from
+   `AREA_FACTOR` — a guess made before a single cell was drawn — and step 6
+   then draws them at whatever size they actually came out. The report puts
+   the predicted saving next to the Liberty area of the published cells. A
+   flow that reports only the prediction is a flow reporting its own
+   assumptions back to itself.
+
+**`FP_SIZING` is `absolute` here, so the die is pinned and is not a result.**
+An area saving shows up as lower utilization and more fill, never as a smaller
+chip. The report says so rather than letting an unchanged die area read as "no
+gain".
+
+`compare_runs.py` is also a plain CLI, so any two LibreLane runs can be
+compared without the flow:
+
+```bash
+python scripts/compare_runs.py flow/7_pnr flow/pnr_simple -o /tmp/report
+```
+
+`scripts/report_html.py` renders a `report.json` on its own, if you only want
+the page:
+
+```bash
+python scripts/report_html.py flow/9_report/report.json -o /tmp/report.html
+```
+
 ## Coherence
 
 Each step records when it finished, the knobs it ran with, and a content
@@ -296,6 +399,11 @@ to manual.
 | `LAYOUT_VERIFY_PEX` | `True` | 6 | re-prove the extracted layout's function in SPICE |
 | `SDF_CORNER` | `nom_slow_1p08V_125C` | 7 | also `nom_typ_1p20V_25C`, `nom_fast_1p32V_m40C` |
 | `PNR_SIM_TOOL` | `icarus` | 7 | `icarus` keeps the SDF delays; `verilator` drops them |
+| `RENDER_WIDTH` | `2400` | 8 | image width in pixels; the header and legend come out of it |
+| `RENDER_HEIGHT` | `None` | 8 | `None` = fit the die's aspect ratio instead of letterboxing it |
+| `RENDER_ZOOM_SITES` | `32` | 8 | width of the per-cell close-up, in placement sites (0.48 µm each) |
+| `REPORT_RUN_BASELINE` | `True` | 9 | harden `flow/pnr_simple/` when there is none on disk (needs the container) |
+| `REPORT_REBUILD_BASELINE` | `False` | 9 | re-harden it even when one exists |
 
 Three of those decide whether the flow works at all:
 
@@ -382,6 +490,10 @@ scripts/flow/
                   verifiable with aion_char
   steps/          one module per step
 flow.py           entry point
+scripts/render_chip.py   the die renderer step 8 calls (also a CLI)
+scripts/compare_runs.py  the run comparison step 9 calls (also a CLI)
+scripts/report_html.py   the same comparison as a page (also a CLI)
+scripts/gds_to_image.py  the single-cell renderer step 6 calls
 ```
 
 ## Troubleshooting

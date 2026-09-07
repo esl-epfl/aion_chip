@@ -31,7 +31,7 @@ scripts/            flow helpers driven by the Makefile
 
 ## Flow
 
-The chip is built by a seven-step flow. `./flow.py` runs it; everything it
+The chip is built by a nine-step flow. `./flow.py` runs it; everything it
 produces lands in `flow/`.
 
 ```bash
@@ -52,6 +52,8 @@ produces lands in `flow/`.
 | 5 | `5_gate_minimization` | re-implement each cell as one CMOS stack, proved in SPICE |
 | 6 | `6_layout_drawing` | draw, verify (DRC/LVS), characterize and publish each cell's views |
 | 7 | `7_pnr` | harden the netlist with those cells, then simulate with SDF delays |
+| 8 | `8_render` | draw the hardened die and mark where the AION cells landed |
+| 9 | `9_report` | compare the chip against the PDK-only baseline — Markdown, JSON and a standalone HTML page |
 
 Every step is runnable and re-runnable on its own, and `flow/coherence.json`
 records what ran when so a re-run of an early step shows up as `STALE`

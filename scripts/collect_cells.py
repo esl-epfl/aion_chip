@@ -347,10 +347,11 @@ def check_pin_access(macro: str, body: str) -> List[str]:
             )
             problems.append(
                 f"{macro}: PIN {pin} is big enough for a via, but every via "
-                f"landing is covered by the macro's own OBS on {above}. If "
-                "that obstruction is the pin's own metal, label it as part of "
-                "the port instead. Detailed routing aborts with "
-                "'DRT-0073 No access point'"
+                f"landing is covered by the macro's own OBS on {above} -- the "
+                "pin's own strap counts, because only the labelled rectangle "
+                "is written out as a PORT. Detailed routing aborts with "
+                f"'DRT-0073 No access point'; declare the port on {above} "
+                f"where that metal already is, or move the {above} off the pin"
             )
         else:
             problems.append(

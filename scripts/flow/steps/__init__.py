@@ -1,7 +1,7 @@
 # ================================================================
 #  SPDX-FileCopyrightText:    2026 Filippo Quadri
 #  SPDX-License-Identifier:   Apache-2.0 WITH SHL-2.1
-#  Description:               The seven steps, in order
+#  Description:               The nine steps, in order
 # ================================================================
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from typing import Optional
 
 from . import (s1_synth, s2_pattern_extraction, s3_rewrite,
                s4_characterization, s5_gate_minimization,
-               s6_layout_drawing, s7_pnr)
+               s6_layout_drawing, s7_pnr, s8_render, s9_report)
 from .base import Context, Step, StepFailed
 
 STEPS = [
@@ -21,6 +21,8 @@ STEPS = [
     s5_gate_minimization.STEP,
     s6_layout_drawing.STEP,
     s7_pnr.STEP,
+    s8_render.STEP,
+    s9_report.STEP,
 ]
 
 BY_KEY = {step.key: step for step in STEPS}
