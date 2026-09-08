@@ -23,6 +23,18 @@ OPCODE_AND = 0b0100
 OPCODE_OR = 0b0101
 OPCODE_XOR = 0b0110
 
+# MAC array. reg_control(6:4) selects the lane, so a MAC command is
+# (lane << 4) | opcode, plus bit 7 to fire it.
+OPCODE_MAC_LOAD = 0b1000
+OPCODE_MAC_RUN = 0b1001
+OPCODE_MAC_CLEAR = 0b1010
+OPCODE_MAC_READ = 0b1011
+
+# reg_control(6:4) is three bits, so at most eight lanes are addressable. How
+# many actually exist is a generic, and the test discovers it rather than being
+# told: the read multiplexer returns zero for a lane that was never built.
+MAC_MAX_LANES = 8
+
 POSIT_NBITS = 16
 POSIT_ES = 2
 
@@ -103,6 +115,29 @@ async def compute_posit(dut, opA, opB, opcode):
     while True:
         status = await read_reg(dut, REG_STATUS)
         if status & 0x01:
+            break
+
+    result_lo = await read_reg(dut, REG_RESULT_LO)
+    result_hi = await read_reg(dut, REG_RESULT_HI)
+    return (result_hi << 8) | result_lo
+
+
+async def mac_command(dut, opcode, lane=0, opA=None, opB=None):
+    """Issue one MAC command and return the selected lane's accumulator.
+
+    Every MAC opcode leaves the accumulator on `result`, so the read-back is
+    the same sequence for LOAD, RUN, CLEAR and READ.
+    """
+    if opA is not None:
+        await write_reg(dut, REG_OP_A_LO, opA)
+        await write_reg(dut, REG_OP_A_HI, opA >> 8)
+    if opB is not None:
+        await write_reg(dut, REG_OP_B_LO, opB)
+        await write_reg(dut, REG_OP_B_HI, opB >> 8)
+
+    await write_reg(dut, REG_CONTROL, ((lane & 0x07) << 4) | (opcode & 0x0F) | 0x80)
+    while True:
+        if (await read_reg(dut, REG_STATUS)) & 0x01:
             break
 
     result_lo = await read_reg(dut, REG_RESULT_LO)
@@ -286,10 +321,12 @@ async def test_posit_fixed_int_compare(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    await _run_compare_tests(dut,
-                             [_to_posit(v) for v in OP_A_INT_FIXED],
-                             [_to_posit(v) for v in OP_B_INT_FIXED],
-                             "FIXED_INT_COMPARE")
+    await _run_compare_tests(
+        dut,
+        [_to_posit(v) for v in OP_A_INT_FIXED],
+        [_to_posit(v) for v in OP_B_INT_FIXED],
+        "FIXED_INT_COMPARE",
+    )
     await FallingEdge(dut.clk)
 
 
@@ -339,8 +376,7 @@ async def test_posit_edge_nar_propagates(dut):
 
     nar = 0x8000
     for value, label in POSIT_EDGE_CASES:
-        for op_a, op_b, side in ((nar, value, "NaR op x"),
-                                 (value, nar, "x op NaR")):
+        for op_a, op_b, side in ((nar, value, "NaR op x"), (value, nar, "x op NaR")):
             for opcode, symbol in ((OPCODE_ADD, "+"), (OPCODE_MULT, "*")):
                 result = await compute_posit(dut, op_a, op_b, opcode)
                 if not posit.isnar(result, POSIT_NBITS, POSIT_ES):
@@ -349,8 +385,10 @@ async def test_posit_edge_nar_propagates(dut):
                         f"0x{op_a:04X} {symbol} 0x{op_b:04X} = 0x{result:04X}, "
                         f"expected 0x{nar:04X}"
                     )
-    dut._log.info(f"NaR propagates through + and * for all "
-                  f"{len(POSIT_EDGE_CASES)} edge operands, both sides")
+    dut._log.info(
+        f"NaR propagates through + and * for all "
+        f"{len(POSIT_EDGE_CASES)} edge operands, both sides"
+    )
 
     await FallingEdge(dut.clk)
 
@@ -366,8 +404,7 @@ async def test_posit_edge_compare(dut):
     op_a_list = [a for a in bits for _ in bits]
     op_b_list = [b for _ in bits for b in bits]
 
-    await _run_compare_tests(dut, op_a_list, op_b_list, "EDGE_COMPARE",
-                             quiet=True)
+    await _run_compare_tests(dut, op_a_list, op_b_list, "EDGE_COMPARE", quiet=True)
     await FallingEdge(dut.clk)
 
 
@@ -383,8 +420,9 @@ async def test_posit_random_add_mult(dut):
     # posits: no NaR, no minpos, no maxpos, nothing near the ends of the
     # range where the arithmetic has to saturate.
     rng = random.Random(42)
-    pairs = [(rng.getrandbits(POSIT_NBITS), rng.getrandbits(POSIT_NBITS))
-             for _ in range(64)]
+    pairs = [
+        (rng.getrandbits(POSIT_NBITS), rng.getrandbits(POSIT_NBITS)) for _ in range(64)
+    ]
 
     for opcode, name in ((OPCODE_ADD, "RANDOM_ADD"), (OPCODE_MULT, "RANDOM_MULT")):
         await _run_arith_pairs(dut, opcode, pairs, name, quiet=True)
@@ -403,8 +441,7 @@ async def test_posit_random_compare(dut):
     op_a_list = [rng.getrandbits(POSIT_NBITS) for _ in range(64)]
     op_b_list = [rng.getrandbits(POSIT_NBITS) for _ in range(64)]
 
-    await _run_compare_tests(dut, op_a_list, op_b_list, "RANDOM_COMPARE",
-                             quiet=True)
+    await _run_compare_tests(dut, op_a_list, op_b_list, "RANDOM_COMPARE", quiet=True)
     await FallingEdge(dut.clk)
 
 
@@ -421,3 +458,114 @@ async def test_posit_random_bitwise(dut):
 
     await _run_bitwise_tests(dut, op_a_list, op_b_list, "RANDOM_BITWISE")
     await FallingEdge(dut.clk)
+
+
+# ----------------------------------------------------------------
+# MAC array
+#
+# The accumulator is posit arithmetic, so the reference has to accumulate in
+# the posit type too -- summing in float and encoding at the end rounds once
+# instead of once per step and disagrees with the hardware on the third term.
+# ----------------------------------------------------------------
+
+
+@cocotb.test()
+async def test_mac_single_lane_dot_product(dut):
+    """acc <- acc + x*y, one lane, checked against Universal step by step."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
+    await reset(dut)
+
+    pairs = [(1.0, 2.0), (0.5, 4.0), (3.0, 0.25), (2.5, -1.5)]
+
+    acc = await mac_command(dut, OPCODE_MAC_CLEAR)
+    assert acc == 0, f"CLEAR left the accumulator at {acc:#06x}, expected 0"
+
+    expected = 0
+    for i, (x, y) in enumerate(pairs):
+        op_a, op_b = _to_posit(x), _to_posit(y)
+        await mac_command(dut, OPCODE_MAC_LOAD, opA=op_a, opB=op_b)
+        acc = await mac_command(dut, OPCODE_MAC_RUN)
+
+        product = posit.mul(op_a, op_b, POSIT_NBITS, POSIT_ES)
+        expected = posit.add(expected, product, POSIT_NBITS, POSIT_ES)
+        assert acc == expected, (
+            f"MAC[{i}]: after {x} * {y} the accumulator is {acc:#06x} "
+            f"({posit.decode(acc, POSIT_NBITS, POSIT_ES)}), expected "
+            f"{expected:#06x} ({posit.decode(expected, POSIT_NBITS, POSIT_ES)})"
+        )
+
+    dut._log.info(
+        f"MAC dot product over {len(pairs)} terms = "
+        f"{posit.decode(acc, POSIT_NBITS, POSIT_ES)}"
+    )
+
+    acc = await mac_command(dut, OPCODE_MAC_CLEAR)
+    assert acc == 0, f"CLEAR after accumulating left {acc:#06x}, expected 0"
+
+
+@cocotb.test()
+async def test_mac_lanes_are_independent(dut):
+    """Each lane keeps its own operands and its own accumulator.
+
+    Loading is per-lane and RUN fires every lane at once, so this also checks
+    that one RUN advances all of them -- the property that makes an array worth
+    building rather than one unit used N times.
+
+    The lane count is a generic, so it is discovered here instead of asserted:
+    a lane that was never built reads back zero, and no lane in this test has
+    zero as its expected value.
+    """
+    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
+    await reset(dut)
+
+    await mac_command(dut, OPCODE_MAC_CLEAR)
+
+    # A different product per lane, so a lane reading another lane's state is a
+    # mismatch rather than a coincidence. None of them is zero.
+    operands = [(float(i + 1), 2.0) for i in range(MAC_MAX_LANES)]
+    for lane, (x, y) in enumerate(operands):
+        await mac_command(
+            dut, OPCODE_MAC_LOAD, lane=lane, opA=_to_posit(x), opB=_to_posit(y)
+        )
+
+    await mac_command(dut, OPCODE_MAC_RUN)
+
+    built = 0
+    for lane, (x, y) in enumerate(operands):
+        acc = await mac_command(dut, OPCODE_MAC_READ, lane=lane)
+        if acc == 0:
+            continue  # this lane was not built
+        built += 1
+        expected = posit.mul(_to_posit(x), _to_posit(y), POSIT_NBITS, POSIT_ES)
+        assert acc == expected, (
+            f"lane {lane}: accumulator {acc:#06x} after one RUN of {x} * {y}, "
+            f"expected {expected:#06x}"
+        )
+
+    assert built >= 1, "no MAC lane responded; lane 0 must always exist"
+    dut._log.info(f"{built} MAC lane(s) built, all accumulated on one RUN")
+
+
+@cocotb.test()
+async def test_mac_does_not_disturb_the_alu(dut):
+    """The ALU opcodes bypass into lane 0; that must not touch its state."""
+    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
+    await reset(dut)
+
+    op_a, op_b = _to_posit(3.0), _to_posit(4.0)
+    await mac_command(dut, OPCODE_MAC_CLEAR)
+    await mac_command(dut, OPCODE_MAC_LOAD, opA=op_a, opB=op_b)
+    acc_before = await mac_command(dut, OPCODE_MAC_RUN)
+
+    # Plain add and multiply run through lane 0's adder and multiplier.
+    other_a, other_b = _to_posit(7.0), _to_posit(9.0)
+    got_add = await compute_posit(dut, other_a, other_b, OPCODE_ADD)
+    got_mul = await compute_posit(dut, other_a, other_b, OPCODE_MULT)
+    assert got_add == posit.add(other_a, other_b, POSIT_NBITS, POSIT_ES)
+    assert got_mul == posit.mul(other_a, other_b, POSIT_NBITS, POSIT_ES)
+
+    acc_after = await mac_command(dut, OPCODE_MAC_READ)
+    assert acc_after == acc_before, (
+        f"the accumulator moved from {acc_before:#06x} to {acc_after:#06x} "
+        "while the ALU borrowed lane 0"
+    )

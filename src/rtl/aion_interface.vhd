@@ -20,6 +20,7 @@ entity aion_interface is
     opA     : out std_logic_vector(15 downto 0);
     opB     : out std_logic_vector(15 downto 0);
     opcode  : out std_logic_vector(3 downto 0);
+    lane    : out std_logic_vector(2 downto 0);
     start   : out std_logic;
     result  : in  std_logic_vector(15 downto 0);
     done    : in  std_logic
@@ -60,12 +61,15 @@ begin
   opA    <= std_logic_vector(reg_opA_hi) & std_logic_vector(reg_opA_lo);
   opB    <= std_logic_vector(reg_opB_hi) & std_logic_vector(reg_opB_lo);
   opcode <= std_logic_vector(reg_control(3 downto 0));
+  -- reg_control(6 downto 4) was the only unused field in the register map, so
+  -- the MAC lane select lives there. Bit 7 is the start trigger.
+  lane   <= std_logic_vector(reg_control(6 downto 4));
   start  <= std_logic(start_pulse);
 
   -- ----------------------------------------------------------------
   -- Start pulse generation
   -- A write to address 4 with bit 7 set generates a one-cycle pulse.
-  -- Bits 3:0 of reg_control carry the ALU opcode.
+  -- Bits 3:0 of reg_control carry the ALU opcode, bits 6:4 the MAC lane.
   -- ----------------------------------------------------------------
   start_pulse <= '1' when (write_en = '1' and addr = "100" and uio_in(7) = '1') else '0';
 

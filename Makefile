@@ -255,14 +255,14 @@ LIBRELANE_CONFIG_SRC  = $(IMPL_DIR)/config.json
 LIBRELANE_SDC         = $(IMPL_DIR)/constraints/aion.sdc
 LIBRELANE_PIN_ORDER   = $(IMPL_DIR)/pin_order.cfg
 
-# TinyTapeout's DEF template for the tile size in info.yaml. It fixes all 43
-# pins on Metal4 along the north edge, which is where the multiplexer routes to,
-# so it supersedes pin_order.cfg -- prepare_librelane_config.py ignores
-# --pin-order when --def-template is given. Point LIBRELANE_DEF_TEMPLATE at a
-# different tt_block_*.def to change tile count; set it empty to fall back to
-# pin_order.cfg and this repo's own floorplan.
+# Pin placement. Empty by default, so pin_order.cfg spreads the pins over all
+# four sides -- what a macro instantiated in a parent needs. Setting
+# LIBRELANE_DEF_TEMPLATE (e.g. to $(IMPL_DIR)/def/tt_block_$(TT_TILES)_pgvdd.def)
+# switches to TinyTapeout's floorplan instead, which pins all 43 pins to the
+# north edge for the multiplexer; prepare_librelane_config.py then ignores
+# --pin-order. DIE_AREA in implementation/config.json has to match.
 TT_TILES             ?= 4x2
-LIBRELANE_DEF_TEMPLATE ?= $(IMPL_DIR)/def/tt_block_$(TT_TILES)_pgvdd.def
+LIBRELANE_DEF_TEMPLATE ?=
 LIBRELANE_FLOORPLAN    = $(if $(LIBRELANE_DEF_TEMPLATE),\
                              --def-template $(LIBRELANE_DEF_TEMPLATE),\
                              --pin-order $(LIBRELANE_PIN_ORDER))
@@ -310,13 +310,15 @@ LOGO_WIDTH           ?= 640
 # OBS still covers the footprint, so the router leaves TopMetal1 there alone.
 LOGO_CLASS           ?= COVER
 
-# Where the logo lands on the die, as the lower-left corner of its macro in
-# microns. Centred on the 4x2 tile (854.40 x 313.74) for a 642.88 x 206.64 macro,
-# snapped to the CoreSite grid. scripts/merge_logo.py drops it into the hardened
-# GDS after PnR and refuses if the router put anything on LOGO_LAYER there --
-# see the '//logo' note in implementation/config.json for why it is a post-step
-# and not a MACROS entry. Set LOGO_AT empty to harden without a logo.
-LOGO_AT              ?= 105.6,52.92
+# `make logo` only draws the macro now; nothing merges it into a hardened GDS
+# automatically, because this design is about to become one of two macros in a
+# parent and the logo belongs to the parent. To place it by hand:
+#
+#   python3 scripts/merge_logo.py <die>.gds implementation/macros/aion_logo.gds \
+#       --at X,Y --design-top tt_um_aion --lef <die>.lef
+#
+# It carves the art around whatever is already on LOGO_LAYER, so it is safe to
+# run on a die whose PDN straps cross the logo. See scripts/merge_logo.py.
 
 # Netlist `make pnr` hardens. Defaults to whatever `make synth` last saved;
 # point it at the AI-rewritten netlist once the cell substitution has run.
@@ -410,14 +412,12 @@ pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) ->
 	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,$(LIBRELANE_FLOORPLAN) --cells-dir $(CELLS_DIR) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_RUN_DIR),--from Checker.NetlistAssignStatements -e nl=nl/$(TOPLEVEL).nl.v)
 	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(PNR_OUT_DIR)
-	$(call merge_logo,$(PNR_OUT_DIR))
 	$(call librelane_finish,$(PNR_RUN_DIR))
 
 pnr_simple: ## Full RTL -> GDS flow with the PDK standard cells only -> flow/pnr_simple/
 	$(call librelane_prepare,$(PNR_SIMPLE_RUN_DIR),pnr_simple,$(LIBRELANE_FLOORPLAN) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_SIMPLE_RUN_DIR),)
 	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_SIMPLE_RUN_DIR) OUT_DIR=$(PNR_SIMPLE_OUT_DIR)
-	$(call merge_logo,$(PNR_SIMPLE_OUT_DIR))
 	$(call librelane_finish,$(PNR_SIMPLE_RUN_DIR))
 
 librelane: pnr_simple ## Alias for pnr_simple
@@ -437,21 +437,6 @@ klayout: ## Open the last run in KLayout (VIEW_RUN_DIR=)
 		--manual-pdk \
 		--last-run \
 		--flow OpenInKLayout
-
-# $(1) output directory of a hardening target
-define merge_logo
-	@if [ -n "$(LOGO_AT)" ] && [ -f "$(MACROS_DIR)/$(LOGO_CELL).gds" ]; then \
-		$(PYTHON) $(PROJECT_ROOT)/scripts/merge_logo.py \
-			$(1)/gds/$(TOPLEVEL).gds \
-			$(MACROS_DIR)/$(LOGO_CELL).gds \
-			--at $(LOGO_AT) \
-			--design-top $(TOPLEVEL) \
-			--layer-name $(LOGO_LAYER) \
-			--lef $(1)/lef/$(TOPLEVEL).lef; \
-	elif [ -n "$(LOGO_AT)" ]; then \
-		echo "No $(MACROS_DIR)/$(LOGO_CELL).gds -- run 'make logo' to put the logo on the die."; \
-	fi
-endef
 
 logo: ## Draw the logo as a GDS + LEF macro -> implementation/macros/
 	@$(PYTHON) $(PROJECT_ROOT)/scripts/logo_to_gds.py $(LOGO_PNG) \

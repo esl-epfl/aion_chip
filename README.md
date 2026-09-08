@@ -19,7 +19,8 @@ scripts/flow/       the handler itself, one module per step
 aion_flow/          submodule: the AI cell tools (aion_opt, aion_char,
                     aion_minimizer, aion_layout) the flow drives
 
-src/rtl/            VHDL sources
+docs/architecture.md  what is inside the chip and how to drive each block
+src/rtl/            VHDL sources (MAC_LANES sizes the design — see below)
 src/tb/             cocotb testbenches
 src/misc/           dump_waves.v, sdf_annotate.v — extra roots for the Icarus runs
 tech/               IHP SG13G2 cell views and their simulation models
@@ -173,18 +174,19 @@ testbench asks for.
 with the right arguments, and they still work by hand. `make pnr_simple` is
 the PDK-only baseline the AI flow is measured against — it belongs to no step.
 
-The floorplan is TinyTapeout's: a **4x2 ihp-sg13g2 tile**, 854.40 × 313.74 µm,
-with TT's own DEF template fixing all 43 pins on Metal4 along the north edge.
-`implementation/config.json` reproduces what `tt-support-tools` generates for
-such a project and says, key by key, where each value comes from — see
-[`implementation/README.md`](implementation/README.md).
+The die is a plain **350 × 200 µm** box, hardened as a macro for a parent to
+instantiate rather than as a TinyTapeout tile. The TT *rules* are still
+honoured — the `tt_um_*` port list, `VPWR`/`VGND`, and the layer restrictions
+that keep the GDS submittable — but not TT's floorplan. See
+[`implementation/README.md`](implementation/README.md), which says which is
+which and why.
 
 `make logo` belongs to no step either: it rasterises the chip's logo onto
 **TopMetal1 (126/0)** inside a **prBoundary (189/4)** and writes a GDS and a LEF.
 The raster pixel is the layer's minimum width, so the art is DRC-clean by
-construction, and the IHP deck confirms it. `make pnr` and `make pnr_simple`
-merge it into the hardened GDS once they have checked that the router left that
-layer alone.
+construction, and the IHP deck confirms it. `scripts/merge_logo.py` places it
+into a hardened GDS on demand, carving the art around whatever is already on
+that layer.
 
 `LENIENT=1` downgrades the hard checkers to warnings; never sign off a run made
 that way. `make openroad` and `make klayout` open the last run in a GUI. See
@@ -217,12 +219,34 @@ for the posit reference model (see above).
 | **Chip Name**             | AION                                         |
 | **Module Name**           | `tt_um_aion`                                 |
 | **Process / Platform**    | IHP SG13G2 130 nm SiGe BiCMOS (Tiny Tapeout) |
-| **Tile Dimensions**       | 4x2 tiles, 854.40 µm × 313.74 µm             |
+| **Die**                   | 350 µm × 200 µm (hardened as a macro)        |
 | **Reference Clock Input** | 1 MHz – 25 MHz (`clk`, 40 ns signoff period) |
 
 ---
 
+## The MAC array
+
+`MAC_LANES`, a VHDL generic on `tt_um_aion`, decides how many posit
+multiply-accumulate lanes the chip carries. It defaults to **1**, which is the
+design as it was: lane 0 holds the only adder and multiplier, and the plain
+arithmetic opcodes bypass into it.
+
+Each further lane is a whole posit multiplier and adder — about 34,400 µm² —
+so this generic, not the RTL, is what sizes the die. One lane fills 55% of a
+350 × 200 core; two do not fit in it at all. The table in
+[`implementation/README.md`](implementation/README.md#what-each-lane-costs)
+gives the box each lane count needs.
+
+The lanes exist to make the AI-generated cell library measurable. Every lane is
+structurally identical, so N lanes multiply the number of sites each mined cell
+covers without adding one new cell type to draw — which is the only lever that
+moves coverage and drawing cost in opposite directions.
+
 ## Register Interface
+
+[`docs/architecture.md`](docs/architecture.md) is the full reference — every
+block, the opcode map, the MAC array and the command sequences. What follows is
+the short version.
 
 The `tt_um_aion` wrapper exposes the AION posit arithmetic unit through a simple byte-wide register file. The register logic is implemented in `aion_interface.vhd` and is connected to the `aion_soc` compute core.
 
@@ -248,8 +272,11 @@ The `tt_um_aion` wrapper exposes the AION posit arithmetic unit through a simple
 | `0x6`   | `result_hi`  | R      | Result, high byte                                |
 | `0x7`   | `status`     | R      | `status[0]` = `done` flag                        |
 
-- Opcode: `0` = posit add, `1` = posit multiply.
-- Writing to `control` with `bit[1] = 1` generates a one-cycle `start` pulse to the compute core.
+- Opcode (`control[3:0]`): `0` add, `1` multiply, `2`–`3` compare, `4`–`6` bitwise,
+  `8`–`11` the MAC array (load / run / clear / read).
+- `control[6:4]` selects the MAC lane; `control[7]` fires the command.
+- A MAC accumulate raises `done` three cycles after the write rather than two —
+  see [`implementation/README.md`](implementation/README.md#the-mac-array).
 
 ### Reading the diagrams
 

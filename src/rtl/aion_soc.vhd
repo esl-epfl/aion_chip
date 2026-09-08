@@ -11,6 +11,10 @@ library ieee;
 library work;
 
 entity aion_soc is
+  generic (
+    -- Lanes in the MAC array; see posit_mac.vhd and implementation/README.md.
+    MAC_LANES : positive := 1
+  );
   port (
     clk     : in  std_logic;
     rst_n   : in  std_logic;
@@ -25,12 +29,16 @@ end entity aion_soc;
 architecture arch of aion_soc is
 
   component posit_alu is
+    generic (
+      MAC_LANES : positive
+    );
     port (
       clk    : in  std_logic;
       rst_n  : in  std_logic;
       opA    : in  std_logic_vector(15 downto 0);
       opB    : in  std_logic_vector(15 downto 0);
       opcode : in  std_logic_vector(3 downto 0);
+      lane   : in  std_logic_vector(2 downto 0);
       start  : in  std_logic;
       result : out std_logic_vector(15 downto 0);
       done   : out std_logic
@@ -47,6 +55,7 @@ architecture arch of aion_soc is
       opA     : out std_logic_vector(15 downto 0);
       opB     : out std_logic_vector(15 downto 0);
       opcode  : out std_logic_vector(3 downto 0);
+      lane    : out std_logic_vector(2 downto 0);
       start   : out std_logic;
       result  : in  std_logic_vector(15 downto 0);
       done    : in  std_logic
@@ -56,6 +65,7 @@ architecture arch of aion_soc is
   signal opA    : std_logic_vector(15 downto 0);
   signal opB    : std_logic_vector(15 downto 0);
   signal opcode : std_logic_vector(3 downto 0);
+  signal lane   : std_logic_vector(2 downto 0);
   signal start  : std_logic;
   signal result_i : std_logic_vector(15 downto 0);
   signal done_i : std_logic;
@@ -75,18 +85,23 @@ begin
       opA    => opA,
       opB    => opB,
       opcode => opcode,
+      lane   => lane,
       start  => start,
       result => result_i,
       done   => done_i
     );
 
   posit_alu_inst : component posit_alu
+    generic map (
+      MAC_LANES => MAC_LANES
+    )
     port map (
       clk    => clk,
       rst_n  => rst_n,
       opA    => opA,
       opB    => opB,
       opcode => opcode,
+      lane   => lane,
       start  => start,
       result => result_i,
       done   => done_i

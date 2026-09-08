@@ -12,47 +12,114 @@ cells/                   AI-generated standard cells (see cells/README.md)
 macros/                  the logo macro, drawn by `make logo` (see below)
 ```
 
-## TinyTapeout compatibility
+## What is kept from TinyTapeout
 
-The floorplan reproduces what `tt-support-tools` generates for a **4x2
-ihp-sg13g2 tile**, so a run here lands the same macro the shuttle would build.
-TT composes two files — the template's `src/config.json` and the
-`user_config.json` that [`project.py`][ttp]'s `create_user_config()` writes —
-and merges them; both are folded into `config.json`, which says where each
-value comes from and which five keys are deliberately dropped.
+The floorplan is **not** TT's any more. This design is hardened to be
+instantiated twice in a top level that lives in another repository, so TT's
+tile `DIE_AREA` and its DEF template — which pins all 43 pins to the north edge
+for the multiplexer — would both be the wrong shape. `DIE_AREA` is a plain
+**350 x 200 um** box and pin placement falls back to `pin_order.cfg`, which
+spreads the pins over all four sides.
 
-| What | Value | Where TT gets it |
-| ---- | ----- | ---------------- |
-| `DIE_AREA` | `0 0 854.40 313.74` | `tech/ihp-sg13g2/tile_sizes.yaml`, key `4x2` |
-| `FP_DEF_TEMPLATE` | `def/tt_block_4x2_pgvdd.def` | `tech/<pdk>/def/tt_block_<tiles>_<def_suffix>.def` |
-| `VDD_PIN` / `GND_PIN` | `VPWR` / `VGND` | `create_user_config()` |
-| `RT_MAX_LAYER` | `TopMetal1` | `tech.py`, `IHPTech.project_top_metal_layer` |
-| `CLOCK_PERIOD` | 20 ns | the template's `src/config.json` |
+What is kept is everything that is a *rule* rather than a floorplan, because
+the macro still has to be submittable:
 
-Change tile size with `make pnr_simple TT_TILES=3x2` once the matching
-`tt_block_<tiles>_pgvdd.def` is in `def/`, and update `DIE_AREA` to that tile's
-row of `tile_sizes.yaml` — the two have to agree, and nothing checks it for you.
+| Rule | Setting | Why |
+| --- | --- | --- |
+| Port list | `clk`, `ena`, `rst_n`, `ui_in[8]`, `uio_in[8]`, `uio_oe[8]`, `uio_out[8]`, `uo_out[8]` | `check_ports()` rejects a `tt_um_*` module missing any of them |
+| Supply names | `VDD_PIN` `VPWR`, `GND_PIN` `VGND` | what the harness declares |
+| Routing ceiling | `RT_MAX_LAYER: TopMetal1` | `IHPTech.project_top_metal_layer` |
+| PDN off TopMetal2 | `PDN_MULTILAYER: false` | `PDN_HORIZONTAL_LAYER` defaults to TopMetal2, and TT's precheck lists `TopMetal2.drawing` in `forbidden_layers` — a project GDS carrying any is rejected |
 
-The DEF template fixes all 43 pins on **Metal4 along the north edge**, which is
-where the multiplexer routes to, so it supersedes `pin_order.cfg`:
-`prepare_librelane_config.py` ignores `--pin-order` when `--def-template` is
-given, and the Makefile passes the latter. `pin_order.cfg` is kept for the
-non-TT floorplan — set `LIBRELANE_DEF_TEMPLATE=` empty to go back to it.
-
-The DEF is vendored rather than referenced because `scripts/docker_run.sh`
-mounts only this project into the container, so TT's `dir::../tt/tech/…` path
-does not resolve here.
-
-### The port list
-
-`check_ports()` rejects a `tt_um_*` module missing any of `clk`, `ena`,
-`rst_n`, `ui_in[8]`, `uio_in[8]`, `uio_oe[8]`, `uio_out[8]`, `uo_out[8]`.
 `ena` is high whenever the tile is selected and powered; AION gates nothing on
-it, so `tt_um_aion.vhd` reads it into a signal called `unused` — a port with no
-reader and a port whose only reader says dropping it was deliberate are
-different things to anyone reading the file later.
+it, so `tt_um_aion.vhd` reads it into a signal called `unused`.
 
-[ttp]: https://github.com/TinyTapeout/tt-support-tools/blob/main/project.py
+`implementation/def/tt_block_4x2_pgvdd.def` is kept in case the TT floorplan is
+wanted again: set `LIBRELANE_DEF_TEMPLATE` to it and change `DIE_AREA` to that
+tile's row of TT's `tile_sizes.yaml` — the two have to agree, and nothing checks
+it for you.
+
+## The MAC array
+
+`MAC_LANES` is the one knob that sizes this macro. It is a VHDL generic on
+`tt_um_aion`, defaulting to **1**, and it decides how many posit multiply-
+accumulate lanes the chip carries.
+
+```vhdl
+-- src/rtl/tt_um_aion.vhd
+MAC_LANES : positive := 1
+```
+
+Change it there for simulation, or override it for a hardening run without
+touching the RTL by adding the generic to `GHDL_ARGUMENTS` in `config.json`:
+
+```json
+"GHDL_ARGUMENTS": "--std=08 -fsynopsys -fexplicit -gMAC_LANES=2"
+```
+
+(FuseSoC cannot pass it: its GHDL backend rejects `paramtype: generic`. The
+cocotb testbench does not need telling — `test_mac_lanes_are_independent`
+discovers how many lanes exist, because a lane that was never built reads back
+zero.)
+
+### What each lane costs
+
+A lane is a `PositMult` (19,781 um²) and a `PositAdder` (8,850 um²). Measured
+through `make synth`, and the reason `MAC_LANES` is the knob that decides the
+die:
+
+| Lanes | Cell area | Utilisation in 350 x 200 | Min core at 60% | Box |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 36,631 um² | 55% | 61,052 um² | **350 x 200** ✓ |
+| 2 | 71,066 um² | 107% | 118,443 um² | ~450 x 265 |
+| 3 | 105,501 um² | 159% | 175,835 um² | ~545 x 325 |
+| 4 | 139,936 um² | 211% | 233,227 um² | ~630 x 370 |
+
+A 350 x 200 box holds **one lane**. Anything more needs `DIE_AREA` to grow with
+it; there is no check that they agree, and global placement will simply fail.
+
+`MAC_LANES=1` is not a degenerate case — it is the design as it was before the
+array existed. Lane 0 carries the only adder and multiplier in the chip, and
+the plain add and multiply opcodes bypass into it rather than owning a second
+pair. That is what keeps one lane affordable; without the bypass, `MAC_LANES=1`
+would have been two of everything.
+
+### Using it
+
+The MAC reuses the existing register map. `reg_control` bits 6:4 — the only
+field that was free — select the lane; bits 3:0 carry the opcode; bit 7 fires
+the command, as before.
+
+| Opcode | Name | Effect |
+| --- | --- | --- |
+| `1000` | `MAC_LOAD` | latch `opA`/`opB` as lane `sel`'s operands |
+| `1001` | `MAC_RUN` | every lane accumulates: `acc += x * y` |
+| `1010` | `MAC_CLEAR` | zero every accumulator |
+| `1011` | `MAC_READ` | read lane `sel`'s accumulator, disturbing nothing |
+
+Every MAC opcode leaves the selected accumulator on `result` (`0x5`/`0x6`), so
+each of them is also a read. A dot product is: `MAC_CLEAR`, then for each term
+`MAC_LOAD` into its lane, then one `MAC_RUN` — which advances **all** lanes at
+once — and `MAC_READ` per lane.
+
+```
+write 0x0/0x1 = opA        write 0x2/0x3 = opB
+write 0x4     = 0x80 | (lane << 4) | opcode
+poll  0x7     until bit 0 (done)
+read  0x5/0x6 = the selected accumulator
+```
+
+Two timing details that are not obvious:
+
+* a MAC accumulate raises `done` **three** cycles after the write, not two. The
+  multiply and the add are both combinational and together are the longest path
+  in the chip, so a lane never puts them in one cycle: `RUN` registers the
+  product, and the cycle after it the sum lands in the accumulator. The extra
+  cycle before that is because `start` is combinational off `ui_in` while
+  `reg_control` is registered — the pulse and its own opcode only agree one
+  cycle later. The plain opcodes still raise `done` after two;
+* `MAC_CLEAR` beats `MAC_RUN`: a clear issued during an accumulate leaves the
+  lane at zero rather than at half a result.
 
 ## Targets
 
@@ -101,8 +168,8 @@ requested target and writes the result to `<run dir>/config.json`. Keys named
 `make logo` turns `logo/AION_Logo_CorrectSize.png` into a macro —
 `aion_logo.gds`, `aion_logo.lef`, and an SVG and PNG to look at.
 `scripts/logo_to_gds.py` does the work; `make logo LOGO_ARGS=--help` lists
-every knob. `make pnr` and `make pnr_simple` then merge it into the hardened
-GDS, which is a post-step for a reason — see *Getting it onto the die* below.
+every knob. Nothing merges it into a hardened GDS automatically any more — see
+*Getting it onto the die* below.
 
 | Variable | Default | What it sets |
 | -------- | ------- | ------------ |
@@ -135,9 +202,17 @@ whole width on them and drops the border and the 3.14 aspect ratio with it.
 
 ### Getting it onto the die
 
-`make pnr` and `make pnr_simple` finish by running `scripts/merge_logo.py`,
-which puts the art into the hardened GDS at `LOGO_AT` and adds the footprint to
-the LEF as an obstruction. It is a post-step rather than a `MACROS` entry
+`scripts/merge_logo.py` puts the art into a hardened GDS and adds the footprint
+to the LEF as an obstruction:
+
+```bash
+python3 scripts/merge_logo.py <die>.gds implementation/macros/aion_logo.gds \
+    --at X,Y --design-top tt_um_aion --lef <die>.lef
+```
+
+The hardening targets no longer run it. This design is about to become one of
+two macros in a parent, and a logo belongs to the parent's die, not to a macro
+that will be instantiated twice. It is a post-step rather than a `MACROS` entry
 because a decorative macro cannot survive a VHDL front end: GHDL imports an
 unbound component as an empty module, that module shadows the liberty blackbox
 LibreLane reads for a `MACROS` entry, and `opt_clean` deletes the instance —

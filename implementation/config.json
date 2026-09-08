@@ -48,6 +48,7 @@
     "dir::rtl/mult.vhd",
     "dir::rtl/posit_compare.vhd",
     "dir::rtl/posit_bitwise.vhd",
+    "dir::rtl/posit_mac.vhd",
     "dir::rtl/posit_alu.vhd",
     "dir::rtl/aion_soc.vhd",
     "dir::rtl/aion_interface.vhd",
@@ -91,20 +92,23 @@
   "SYNTH_TIE_UNDEFINED": "low",
 
   "//floorplan": [
-    "tt-support-tools, create_user_config(): DIE_AREA is tile_sizes.yaml's entry",
-    "for the tile count, and there is no CORE_AREA -- the DEF template places the",
-    "rows and the *_MARGIN_MULT keys set the standard-cell keep-out from the die",
-    "edge. 4x2 is '0 0 854.40 313.74'.",
+    "A plain 350 x 200 um box. This macro is not hardened as a TinyTapeout tile",
+    "any more -- it is hardened to be instantiated, twice, in a top level that",
+    "lives in another repository, so TT's DIE_AREA and its DEF template (which",
+    "pins all 43 pins to the north edge for the multiplexer) would both be the",
+    "wrong shape. implementation/def/tt_block_4x2_pgvdd.def is kept in case the",
+    "TT floorplan is wanted again; set LIBRELANE_DEF_TEMPLATE to re-enable it.",
     "",
-    "FP_DEF_TEMPLATE is TT's tt_block_4x2_pgvdd.def, vendored under def/ because",
-    "scripts/docker_run.sh mounts only this project into the container, so the",
-    "'dir::../tt/tech/...' path project.py writes does not resolve here. It fixes",
-    "all 43 pins on Metal4 along the north edge, which is where the multiplexer",
-    "expects to find them -- so it supersedes pin_order.cfg, and the Makefile",
-    "passes --def-template instead of --pin-order."
+    "Pin placement therefore falls back to implementation/pin_order.cfg, which",
+    "spreads the pins over all four sides -- what you want for a macro a parent",
+    "has to route to from an arbitrary direction.",
+    "",
+    "What is kept from TinyTapeout is everything that is a *rule* rather than a",
+    "floorplan: the tt_um_* port list including ena, the VPWR/VGND supply names,",
+    "and the layer restrictions under '//routing' below."
   ],
   "FP_SIZING": "absolute",
-  "DIE_AREA": [0, 0, 854.40, 313.74],
+  "DIE_AREA": [0, 0, 350, 200],
   "TOP_MARGIN_MULT": 1,
   "BOTTOM_MARGIN_MULT": 1,
   "LEFT_MARGIN_MULT": 6,
@@ -123,9 +127,14 @@
   "PDN_MULTILAYER": false,
 
   "//routing": [
-    "RT_MAX_LAYER is tech.py's project_top_metal_layer for ihp-sg13g2. It is the",
-    "same layer the logo is drawn on, which is safe only because the logo macro's",
-    "LEF obstructs its whole footprint -- see the MACROS block below."
+    "The layer rules TinyTapeout imposes, which outlive its floorplan.",
+    "",
+    "RT_MAX_LAYER is tech.py's project_top_metal_layer for ihp-sg13g2: a project",
+    "may route up to TopMetal1 and no further. PDN_MULTILAYER off is the other",
+    "half of the same rule -- PDN_HORIZONTAL_LAYER defaults to TopMetal2 for this",
+    "PDK, and tt-support-tools' precheck lists TopMetal2.drawing among its",
+    "forbidden layers, so a project GDS carrying any is rejected. Leaving these",
+    "two alone is what keeps the macro submittable."
   ],
   "RT_MAX_LAYER": "TopMetal1",
   "IO_PIN_H_LENGTH": 2,
@@ -143,26 +152,11 @@
   "ERRORS_ON_UNMATCHED_IO": "both",
 
   "//logo": [
-    "The logo is NOT a MACROS entry, and the reason is worth recording so it is",
-    "not rediscovered. Odb.ManualMacroPlacement places instances that exist in",
-    "the netlist, and a decorative macro never reaches the netlist through a VHDL",
-    "front end: GHDL imports an unbound component as an empty module, that empty",
-    "module shadows the liberty blackbox LibreLane reads for a MACROS entry, and",
-    "yosys opt_clean deletes it. Tested with no ports, with a connected input,",
-    "and with keep / syn_keep / keep_hierarchy on the instance -- removed every",
-    "time, because GHDL propagates none of those attributes. So the art is merged",
-    "into the hardened GDS afterwards, by scripts/merge_logo.py, which the pnr",
-    "targets run.",
-    "",
-    "It has to share TopMetal1 with the PDN. PDN_VERTICAL_LAYER is TopMetal1 for",
-    "this PDK, so the straps below -- 2.2 um wide, 38.87 um apart -- cross the",
-    "whole die, and a floating island bridging a VPWR strap and a VGND one would",
-    "short the supply. Moving the logo does not help and there is no free layer",
-    "to move it to: PDN_MULTILAYER off keeps the PDN off TopMetal2, but",
-    "tt-support-tools' precheck lists TopMetal2.drawing among its forbidden",
-    "layers, so a project GDS carrying any is rejected outright. merge_logo.py",
-    "therefore subtracts the straps, grown by TM1.b, from the art and opens what",
-    "is left by TM1.a. It costs about a sixth of the strokes and reads as itself."
+    "The logo is not merged by the pnr targets any more. scripts/merge_logo.py",
+    "still does the job on demand -- it carves the art around whatever the",
+    "design put on the layer -- but a macro that is about to be instantiated",
+    "twice in a parent is the wrong place to put a logo, so it belongs to the",
+    "parent's hardening instead. See implementation/README.md."
   ],
 
   "_modes": {
