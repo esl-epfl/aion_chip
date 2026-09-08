@@ -43,8 +43,8 @@ endif
 
 .PHONY: all sim post_synth_sim post_synth_sim_ai post_pnr_sim post_pnr_sim_ai sim_all setup format \
         clean clean-impl clean-flow clean-all waves synth pnr pnr_simple librelane \
-        openroad klayout _save_run _setup_cocotb_env _require_sdf _check_sim_results \
-        flow flow-status flow-list
+        openroad klayout logo _save_run _setup_cocotb_env _require_sdf _check_sim_results \
+        flow flow-status flow-list universal universal-update
 
 all: sim
 
@@ -255,6 +255,18 @@ LIBRELANE_CONFIG_SRC  = $(IMPL_DIR)/config.json
 LIBRELANE_SDC         = $(IMPL_DIR)/constraints/aion.sdc
 LIBRELANE_PIN_ORDER   = $(IMPL_DIR)/pin_order.cfg
 
+# TinyTapeout's DEF template for the tile size in info.yaml. It fixes all 43
+# pins on Metal4 along the north edge, which is where the multiplexer routes to,
+# so it supersedes pin_order.cfg -- prepare_librelane_config.py ignores
+# --pin-order when --def-template is given. Point LIBRELANE_DEF_TEMPLATE at a
+# different tt_block_*.def to change tile count; set it empty to fall back to
+# pin_order.cfg and this repo's own floorplan.
+TT_TILES             ?= 4x2
+LIBRELANE_DEF_TEMPLATE ?= $(IMPL_DIR)/def/tt_block_$(TT_TILES)_pgvdd.def
+LIBRELANE_FLOORPLAN    = $(if $(LIBRELANE_DEF_TEMPLATE),\
+                             --def-template $(LIBRELANE_DEF_TEMPLATE),\
+                             --pin-order $(LIBRELANE_PIN_ORDER))
+
 # Outputs: generated, git-ignored apart from the .core files.
 FLOW_DIR              = $(PROJECT_ROOT)/flow
 
@@ -271,6 +283,40 @@ PNR_SIMPLE_OUT_DIR   ?= $(FLOW_DIR)/pnr_simple
 # Directory of AI-generated cell views (LEF/LIB/GDS/Verilog/SPICE), consumed by
 # `make pnr` only. Empty or absent means "PDK standard cells only".
 CELLS_DIR            ?= $(IMPL_DIR)/cells
+
+# The chip's logo, drawn as a macro on a top metal by `make logo`, and
+# instantiated by tt_um_aion as an unbound component so it lands in the netlist
+# for Odb.ManualMacroPlacement to place. LOGO_CELL is lower case because that is
+# what GHDL makes of a VHDL identifier, and the netlist name has to match the
+# LEF macro exactly. LOGO_WIDTH is
+# the width of the *picture* in microns -- canvas and blank border included, so
+# the macro keeps the proportions the picture has; the height follows its aspect
+# ratio, and the raster pixel follows LOGO_LAYER's minimum width and spacing.
+#
+#   make logo LOGO_ARGS=--crop                 the strokes alone, no border
+#   make logo LOGO_ARGS="--invert --recog"     the background, letters cut out
+#
+# --recog is what keeps the inverted plate out of the slit rules; without it
+# --strict refuses the run. `make logo LOGO_ARGS=--help` lists the rest.
+MACROS_DIR           ?= $(IMPL_DIR)/macros
+LOGO_PNG             ?= $(PROJECT_ROOT)/logo/AION_Logo_CorrectSize.png
+LOGO_CELL            ?= aion_logo
+LOGO_LAYER           ?= TopMetal1
+LOGO_WIDTH           ?= 640
+
+# COVER, not BLOCK: the art is on TopMetal1 and the standard cells are on
+# Metal1/Metal2, so nothing stops the placer filling the area underneath -- and
+# a BLOCK macro this size would sterilise a large slice of a 4x2 tile. The LEF's
+# OBS still covers the footprint, so the router leaves TopMetal1 there alone.
+LOGO_CLASS           ?= COVER
+
+# Where the logo lands on the die, as the lower-left corner of its macro in
+# microns. Centred on the 4x2 tile (854.40 x 313.74) for a 642.88 x 206.64 macro,
+# snapped to the CoreSite grid. scripts/merge_logo.py drops it into the hardened
+# GDS after PnR and refuses if the router put anything on LOGO_LAYER there --
+# see the '//logo' note in implementation/config.json for why it is a post-step
+# and not a MACROS entry. Set LOGO_AT empty to harden without a logo.
+LOGO_AT              ?= 105.6,52.92
 
 # Netlist `make pnr` hardens. Defaults to whatever `make synth` last saved;
 # point it at the AI-rewritten netlist once the cell substitution has run.
@@ -361,15 +407,17 @@ pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) ->
 	fi
 	@mkdir -p $(PNR_RUN_DIR)/nl
 	@cp -v $(NETLIST) $(PNR_RUN_DIR)/nl/$(TOPLEVEL).nl.v
-	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,--pin-order $(LIBRELANE_PIN_ORDER) --cells-dir $(CELLS_DIR) $(LENIENT_FLAG))
+	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,$(LIBRELANE_FLOORPLAN) --cells-dir $(CELLS_DIR) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_RUN_DIR),--from Checker.NetlistAssignStatements -e nl=nl/$(TOPLEVEL).nl.v)
 	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(PNR_OUT_DIR)
+	$(call merge_logo,$(PNR_OUT_DIR))
 	$(call librelane_finish,$(PNR_RUN_DIR))
 
 pnr_simple: ## Full RTL -> GDS flow with the PDK standard cells only -> flow/pnr_simple/
-	$(call librelane_prepare,$(PNR_SIMPLE_RUN_DIR),pnr_simple,--pin-order $(LIBRELANE_PIN_ORDER) $(LENIENT_FLAG))
+	$(call librelane_prepare,$(PNR_SIMPLE_RUN_DIR),pnr_simple,$(LIBRELANE_FLOORPLAN) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_SIMPLE_RUN_DIR),)
 	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_SIMPLE_RUN_DIR) OUT_DIR=$(PNR_SIMPLE_OUT_DIR)
+	$(call merge_logo,$(PNR_SIMPLE_OUT_DIR))
 	$(call librelane_finish,$(PNR_SIMPLE_RUN_DIR))
 
 librelane: pnr_simple ## Alias for pnr_simple
@@ -389,6 +437,30 @@ klayout: ## Open the last run in KLayout (VIEW_RUN_DIR=)
 		--manual-pdk \
 		--last-run \
 		--flow OpenInKLayout
+
+# $(1) output directory of a hardening target
+define merge_logo
+	@if [ -n "$(LOGO_AT)" ] && [ -f "$(MACROS_DIR)/$(LOGO_CELL).gds" ]; then \
+		$(PYTHON) $(PROJECT_ROOT)/scripts/merge_logo.py \
+			$(1)/gds/$(TOPLEVEL).gds \
+			$(MACROS_DIR)/$(LOGO_CELL).gds \
+			--at $(LOGO_AT) \
+			--design-top $(TOPLEVEL) \
+			--layer-name $(LOGO_LAYER) \
+			--lef $(1)/lef/$(TOPLEVEL).lef; \
+	elif [ -n "$(LOGO_AT)" ]; then \
+		echo "No $(MACROS_DIR)/$(LOGO_CELL).gds -- run 'make logo' to put the logo on the die."; \
+	fi
+endef
+
+logo: ## Draw the logo as a GDS + LEF macro -> implementation/macros/
+	@$(PYTHON) $(PROJECT_ROOT)/scripts/logo_to_gds.py $(LOGO_PNG) \
+		--outdir $(MACROS_DIR) \
+		--cell $(LOGO_CELL) \
+		--layer $(LOGO_LAYER) \
+		--width $(LOGO_WIDTH) \
+		--lef-class $(LOGO_CLASS) \
+		--strict $(LOGO_ARGS)
 
 # ==============================================================================
 # AION flow handler
@@ -448,13 +520,68 @@ _save_run:
 	echo "Artifacts saved to $(OUT_DIR)/"
 
 # ------------------------------------------------------------------------------
+# Posit reference model (Stillwater Universal)
+# ------------------------------------------------------------------------------
+# The cocotb testbenches check the DUT against Universal, the reference posit
+# implementation, rather than against a model written here. Universal is a
+# header-only C++20 template library with no Python bindings, so src/tb/
+# carries a small `extern "C"` shim and src/tb/posit.py is ctypes over it.
+#
+# Only include/ is fetched (a sparse, blobless checkout: ~12 MB against ~790 MB
+# for the full tree, which is almost entirely docs) and it is pinned to a
+# release tag so a reference model never changes under a design.
+#
+#   make universal            fetch + build (idempotent; the sim targets call it)
+#   make universal-update     re-fetch after changing UNIVERSAL_VERSION
+#   UNIVERSAL_ROOT=/usr/local make universal   use an installed copy instead
+# ------------------------------------------------------------------------------
+UNIVERSAL_VERSION ?= v4.10.1
+UNIVERSAL_REPO    ?= https://github.com/stillwater-sc/universal.git
+UNIVERSAL_DIR     ?= $(BUILD_DIR)/universal
+UNIVERSAL_ROOT    ?= $(UNIVERSAL_DIR)
+UNIVERSAL_INCLUDE  = $(UNIVERSAL_ROOT)/include/sw
+UNIVERSAL_SHIM     = $(PROJECT_ROOT)/src/tb/universal_posit.cpp
+UNIVERSAL_LIB      = $(PROJECT_ROOT)/src/tb/libuniversal_posit.so
+
+CXX      ?= g++
+CXXFLAGS ?= -O2 -std=c++20 -Wall -Wextra
+
+.PHONY: universal universal-update
+
+universal: $(UNIVERSAL_LIB) ## Fetch Universal and build the posit reference shim
+
+$(UNIVERSAL_INCLUDE)/universal/number/posit/posit.hpp:
+	@echo "Fetching Universal $(UNIVERSAL_VERSION) (headers only)"
+	@rm -rf $(UNIVERSAL_DIR)
+	@mkdir -p $(UNIVERSAL_DIR)
+	@cd $(UNIVERSAL_DIR) && \
+		git init -q . && \
+		git remote add origin $(UNIVERSAL_REPO) && \
+		git sparse-checkout init --cone >/dev/null && \
+		git sparse-checkout set include >/dev/null && \
+		git -c protocol.version=2 fetch --depth 1 --filter=blob:none \
+			origin refs/tags/$(UNIVERSAL_VERSION) >/dev/null 2>&1 && \
+		git checkout -q FETCH_HEAD
+	@test -f $@ || { echo "Error: $@ missing after fetch"; exit 1; }
+
+$(UNIVERSAL_LIB): $(UNIVERSAL_SHIM) $(UNIVERSAL_INCLUDE)/universal/number/posit/posit.hpp
+	@echo "Building $(notdir $@) against Universal $(UNIVERSAL_VERSION)"
+	@$(CXX) $(CXXFLAGS) -shared -fPIC -I$(UNIVERSAL_INCLUDE) \
+		-DUNIVERSAL_VERSION_STRING='"$(UNIVERSAL_VERSION)"' \
+		$< -o $@
+
+universal-update: ## Re-fetch Universal at UNIVERSAL_VERSION and rebuild
+	@rm -rf $(UNIVERSAL_DIR) $(UNIVERSAL_LIB)
+	@$(MAKE) --no-print-directory universal
+
+# ------------------------------------------------------------------------------
 # Cocotb Variable Export Routine
 # ------------------------------------------------------------------------------
 # COCOTB_TEST_MODULES and PYGPI_PYTHON_BIN are set by the Edalize `sim` flow
 # from `cocotb_module` in aion.core, so they are deliberately not set here.
 # COCOTB_TOPLEVEL is: the Icarus runs elaborate two or three root modules and
 # cocotb has to be told which one is the DUT.
-_setup_cocotb_env:
+_setup_cocotb_env: $(UNIVERSAL_LIB)
 	$(eval export COCOTB_ANSI_OUTPUT := 1)
 	$(eval export COCOTB_TOPLEVEL    := $(TOPLEVEL))
 	$(eval export PYTHONPATH         := $(shell realpath $(TEST_DIRS)):$(PYTHONPATH))

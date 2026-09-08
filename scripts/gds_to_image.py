@@ -42,6 +42,11 @@ DEFAULT_LAYER_COLOURS: Dict[Pair, RGBA] = {
     (19, 0): (255, 255, 255, 90),   # Via1
     (31, 0): (150, 50, 255, 15),    # NWell
     (46, 0): (100, 255, 255, 15),   # PWell
+    (67, 0): (120, 160, 255, 60),   # Metal5
+    (126, 0): (255, 215, 90, 70),   # TopMetal1
+    (134, 0): (255, 150, 90, 70),   # TopMetal2
+    (9, 0): (230, 230, 230, 25),    # Passiv
+    (99, 0): (255, 60, 140, 12),    # Recog
     (189, 4): (180, 180, 180, 15),  # prBoundary
 }
 
@@ -62,6 +67,13 @@ LAYER_NAMES: Dict[Pair, str] = {
     (19, 0): "Via1",
     (31, 0): "NWell",
     (46, 0): "PWell",
+    (30, 0): "Metal3",
+    (50, 0): "Metal4",
+    (67, 0): "Metal5",
+    (126, 0): "TopMetal1",
+    (134, 0): "TopMetal2",
+    (9, 0): "Passiv",
+    (99, 0): "Recog",
     (189, 4): "prBoundary",
 }
 
@@ -70,6 +82,7 @@ LAYER_NAMES: Dict[Pair, str] = {
 # washing out what sits on top of them.
 DRAW_ORDER: Dict[Pair, int] = {
     (189, 4): 0,
+    (99, 0): 0,
     (31, 0): 1,
     (46, 0): 2,
     (14, 0): 3,
@@ -84,6 +97,12 @@ DRAW_ORDER: Dict[Pair, int] = {
     (10, 0): 12,
     (10, 2): 13,
     (10, 25): 14,
+    (30, 0): 15,
+    (50, 0): 16,
+    (67, 0): 17,
+    (126, 0): 18,
+    (134, 0): 19,
+    (9, 0): 20,
 }
 
 BACKGROUND_COLOUR: RGBA = (0, 0, 0, 255)

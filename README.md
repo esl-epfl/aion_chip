@@ -23,8 +23,9 @@ src/rtl/            VHDL sources
 src/tb/             cocotb testbenches
 src/misc/           dump_waves.v, sdf_annotate.v — extra roots for the Icarus runs
 tech/               IHP SG13G2 cell views and their simulation models
-implementation/     flow inputs: config template, SDC, pin order
+implementation/     flow inputs: config template, SDC, TT DEF template
 implementation/cells/   AI cell views, published by flow step 6  (git-ignored)
+implementation/macros/  the logo macro, drawn by `make logo`
 flow/               every step's output, one directory per step  (git-ignored)
 scripts/            flow helpers driven by the Makefile
 ```
@@ -85,6 +86,37 @@ The flow runs these for you at the right moments; they are also usable alone.
 The `_ai` targets are the AION-cell half of each pair: same testbench, same
 corner, but against a netlist built from the mined cells.
 
+#### The posit reference model
+
+Every testbench checks the DUT against
+[Stillwater Universal](https://github.com/stillwater-sc/universal), the
+reference posit implementation — not against a model written here. Universal
+is header-only C++20 with no Python bindings, so `src/tb/universal_posit.cpp`
+is a small `extern "C"` shim and `src/tb/posit.py` is `ctypes` over it; the
+testbenches gain no Python dependency.
+
+```bash
+make universal          # fetch the headers and build the shim (the sim targets do this)
+make universal-update   # re-fetch after changing UNIVERSAL_VERSION
+```
+
+Only `include/` is fetched, sparse and blobless and pinned to a release tag:
+~12 MB, against ~790 MB for the full tree, which is almost entirely docs. Set
+`UNIVERSAL_ROOT=` to build against a copy you already have installed.
+
+Arithmetic happens **in** the posit type. Decoding to `float`, operating
+there and re-encoding agrees at Posit<16,2> — a double has enough mantissa to
+make one rounding step exact — but that is a property of this width, not a
+rule.
+
+An exact reference makes the ends of the range testable, so the testbenches
+sweep them: `POSIT_EDGE_CASES` crosses zero, ±one, ±minpos, ±maxpos, NaR and
+the four truncated-exponent patterns with each other (144 pairs per operation,
+44 of which saturate), NaR propagation is asserted directly on both operand
+positions, and the random tests draw **encodings** rather than floats from a
+narrow range. The old model decoded four of those patterns to half their true
+value, so nothing could be checked against them.
+
 GHDL is the only simulator that reads the VHDL, so RTL simulation has exactly
 one backend; Verilator and Icarus only ever see gate-level Verilog.
 
@@ -130,15 +162,29 @@ testbench asks for.
 
 ### Physical implementation
 
-| Target            | In                        | Out                 |
-| ----------------- | ------------------------- | ------------------- |
-| `make synth`      | VHDL via FuseSoC          | `flow/1_synth/`     |
-| `make pnr`        | `NETLIST=` + `CELLS_DIR=` | `flow/7_pnr/`       |
-| `make pnr_simple` | VHDL via FuseSoC          | `flow/pnr_simple/`  |
+| Target            | In                        | Out                     |
+| ----------------- | ------------------------- | ----------------------- |
+| `make synth`      | VHDL via FuseSoC          | `flow/1_synth/`         |
+| `make pnr`        | `NETLIST=` + `CELLS_DIR=` | `flow/7_pnr/`           |
+| `make pnr_simple` | VHDL via FuseSoC          | `flow/pnr_simple/`      |
+| `make logo`       | `logo/*.png`              | `implementation/macros/`|
 
 `make synth` is flow step 1 and `make pnr` is flow step 7; the flow calls them
 with the right arguments, and they still work by hand. `make pnr_simple` is
 the PDK-only baseline the AI flow is measured against — it belongs to no step.
+
+The floorplan is TinyTapeout's: a **4x2 ihp-sg13g2 tile**, 854.40 × 313.74 µm,
+with TT's own DEF template fixing all 43 pins on Metal4 along the north edge.
+`implementation/config.json` reproduces what `tt-support-tools` generates for
+such a project and says, key by key, where each value comes from — see
+[`implementation/README.md`](implementation/README.md).
+
+`make logo` belongs to no step either: it rasterises the chip's logo onto
+**TopMetal1 (126/0)** inside a **prBoundary (189/4)** and writes a GDS and a LEF.
+The raster pixel is the layer's minimum width, so the art is DRC-clean by
+construction, and the IHP deck confirms it. `make pnr` and `make pnr_simple`
+merge it into the hardened GDS once they have checked that the router left that
+layer alone.
 
 `LENIENT=1` downgrades the hard checkers to warnings; never sign off a run made
 that way. `make openroad` and `make klayout` open the last run in a GUI. See
@@ -157,7 +203,8 @@ docker start iic-osic-tools_shell_uid_1000
 
 The flow probes for it and says so up front rather than failing halfway. On the
 host you need the conda environment (`source env.sh`) for `yosys`, `ghdl`,
-`iverilog`, `verilator`, `fusesoc` and cocotb.
+`iverilog`, `verilator`, `fusesoc` and cocotb, plus a C++20 compiler and `git`
+for the posit reference model (see above).
 
 ---
 
@@ -170,8 +217,8 @@ host you need the conda environment (`source env.sh`) for `yosys`, `ghdl`,
 | **Chip Name**             | AION                                         |
 | **Module Name**           | `tt_um_aion`                                 |
 | **Process / Platform**    | IHP SG13G2 130 nm SiGe BiCMOS (Tiny Tapeout) |
-| **Tile Dimensions**       | 668 µm × 216 µm                              |
-| **Reference Clock Input** | 1 MHz – 50 MHz (`clk`)                       |
+| **Tile Dimensions**       | 4x2 tiles, 854.40 µm × 313.74 µm             |
+| **Reference Clock Input** | 1 MHz – 25 MHz (`clk`, 40 ns signoff period) |
 
 ---
 
@@ -186,6 +233,7 @@ The `tt_um_aion` wrapper exposes the AION posit arithmetic unit through a simple
 | `ui_in`   | Input     | `ui_in[2:0]` = register address, `ui_in[7]` = R/W direction (`1` = write, `0` = read) |
 | `uio_in`  | Input     | Write data byte                      |
 | `uo_out`  | Output    | Read data byte                       |
+| `ena`     | Input     | Required by the TinyTapeout harness; AION does not use it |
 
 ### Register Map
 

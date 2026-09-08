@@ -4,6 +4,10 @@ env.sh
 # pycache & venv
 __pycache__/
 
+# the Universal posit shim: fetched headers live under .build/ (already
+# ignored); the compiled library is a build artifact of `make universal`.
+src/tb/libuniversal_posit.so
+
 # fusesoc build directory
 .build/
 

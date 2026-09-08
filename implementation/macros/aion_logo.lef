@@ -1,0 +1,23 @@
+# logo_to_gds.py: aion_logo generated from logo/AION_Logo_CorrectSize.png
+# logo_to_gds.py: art on TopMetal1 (126/0), prBoundary on 189/4, 1.640 um raster
+# logo_to_gds.py: SIZE is the prBoundary; the OBS covers it entirely, so nothing is routed across the art
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+
+MACRO aion_logo
+  CLASS COVER ;
+  FOREIGN aion_logo 0 0 ;
+  ORIGIN 0.000 0.000 ;
+  SIZE 642.880 BY 206.640 ;
+  SYMMETRY X Y ;
+  OBS
+    LAYER TopMetal1 ;
+      RECT 0.000 0.000 642.880 206.640 ;
+  END
+END aion_logo
+
+END LIBRARY

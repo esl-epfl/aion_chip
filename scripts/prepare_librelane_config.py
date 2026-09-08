@@ -28,7 +28,18 @@ VHDL_SYNTH_ONLY_FLOW = [
 ]
 
 # Keys the template carries for our own benefit that LibreLane must not see.
-TEMPLATE_ONLY_KEYS = ("//", "_modes")
+# Any key starting with "//" is a comment: the template groups its notes next to
+# the settings they explain ("//floorplan", "//power"), which JSON has no syntax
+# for and LibreLane would report as unknown variables.
+TEMPLATE_ONLY_KEYS = ("_modes",)
+COMMENT_PREFIX = "//"
+
+
+def is_template_only(key) -> bool:
+    """Whether a key belongs to the template rather than to LibreLane."""
+    return isinstance(key, str) and (
+        key in TEMPLATE_ONLY_KEYS or key.startswith(COMMENT_PREFIX)
+    )
 
 MODES = ("synth", "pnr", "pnr_simple")
 
@@ -64,7 +75,7 @@ def strip_template_keys(obj):
         return {
             k: strip_template_keys(v)
             for k, v in obj.items()
-            if k not in TEMPLATE_ONLY_KEYS
+            if not is_template_only(k)
         }
     if isinstance(obj, list):
         return [strip_template_keys(v) for v in obj]
@@ -74,13 +85,13 @@ def strip_template_keys(obj):
 def apply_overlay(config: dict, overlay: dict, label: str) -> None:
     """Merge an overlay into the config, one level deep for 'meta'."""
     for key, value in overlay.items():
-        if key in TEMPLATE_ONLY_KEYS:
+        if is_template_only(key):
             continue
         if key == "meta" and isinstance(value, dict):
             config.setdefault("meta", {}).update(value)
         else:
             config[key] = value
-    keys = sorted(k for k in overlay if k not in TEMPLATE_ONLY_KEYS)
+    keys = sorted(k for k in overlay if not is_template_only(k))
     if keys:
         print(f"  overlay '{label}': {', '.join(keys)}")
 
@@ -130,6 +141,16 @@ def main():
         default=None,
         help="Path to a DEF template that fixes pin placement and PDN (optional). "
         "Overrides --pin-order when both are given.",
+    )
+    parser.add_argument(
+        "--macro",
+        action="append",
+        default=[],
+        metavar="NAME=DIR",
+        help="Fill in MACROS[NAME]'s view paths from DIR/NAME.{gds,lef,lib}. "
+        "The template declares the macro and where its instances go; this only "
+        "rewrites the paths, which is the one part that depends on the run "
+        "directory. Repeatable.",
     )
     parser.add_argument(
         "--cells-dir",
@@ -246,6 +267,43 @@ def main():
             )
         else:
             print(f"  cells: none found under {args.cells_dir}")
+
+    # ------------------------------------------------------------------
+    # Macros
+    #
+    # A macro's placement belongs in the template next to the floorplan it
+    # depends on; only its view paths have to be recomputed per run directory,
+    # so that is all this does. A --macro naming a key the template does not
+    # declare is a typo, not a request to invent a placement, so it fails.
+    # ------------------------------------------------------------------
+    for spec in args.macro:
+        name, _, directory = spec.partition("=")
+        if not name or not directory:
+            print(f"Error: --macro expects NAME=DIR, got {spec!r}", file=sys.stderr)
+            sys.exit(1)
+        macros = config.get("MACROS")
+        if not isinstance(macros, dict) or name not in macros:
+            print(
+                f"Error: --macro {name}: the config template declares no "
+                f"MACROS['{name}'] to attach views to.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        views = {}
+        for view, key in (("gds", "gds"), ("lef", "lef"), ("lib", "lib")):
+            path = os.path.join(directory, f"{name}.{view}")
+            if os.path.isfile(path):
+                views[key] = [make_relative(path, args.ip_dir)]
+        for required in ("gds", "lef"):
+            if required not in views:
+                print(
+                    f"Error: --macro {name}: no {name}.{required} in {directory} "
+                    "-- run `make logo` first?",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        macros[name].update(views)
+        print(f"  macro {name}: {', '.join(sorted(views))} from {directory}")
 
     # ------------------------------------------------------------------
     # Mode overlays
