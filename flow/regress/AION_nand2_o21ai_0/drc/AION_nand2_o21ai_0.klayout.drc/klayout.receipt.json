@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "tool": "klayout",
-  "cell": "AION_nand2_o21ai_0",
-  "exit_status": 0,
-  "databases": [
-    "AION_nand2_o21ai_0_AION_nand2_o21ai_0_full.lyrdb"
-  ]
-}
