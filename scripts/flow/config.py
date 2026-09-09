@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from typing import Optional
 
 
 def optional(name: str, value) -> list:
@@ -63,15 +62,15 @@ class Config:
     #                     cell -- which is almost never what you want, since
     #                     every kept cell has to be drawn by hand in step 6)
     # ELITE_METRIC        saved-area | occurrences | saved-area-per-cell
-    MAX_SIZE: int = 3
+    MAX_SIZE: int = 5
     MIN_OCCURRENCES: int = 2
-    MIN_SELECTED: Optional[int] = None
+    MIN_SELECTED: int | None = None
     AREA_FACTOR: float = 0.65
-    MAX_OUTPUTS: Optional[int] = 1
-    MAX_INPUTS: Optional[int] = 5
-    JOBS: Optional[int] = None
+    MAX_OUTPUTS: int | None = 1
+    MAX_INPUTS: int | None = 15
+    JOBS: int | None = None
     CELL_PREFIX: str = "AION_"
-    ELITE_COUNT: Optional[int] = 2
+    ELITE_COUNT: int | None = 25
     ELITE_METRIC: str = "saved-area"
 
     # =====================================================================
@@ -95,7 +94,7 @@ class Config:
 
     # Liberty the LEC reads. None = run_lec_sec.py's own default
     # (aion_flow/tech/lib/sg13g2_stdcell_typ_1p20V_25C.lib).
-    LEC_LIB: Optional[str] = None
+    LEC_LIB: str | None = None
 
     # =====================================================================
     # 5_gate_minimization   (aion_minimizer)
@@ -141,8 +140,8 @@ class Config:
     DRAW_STREAM: bool = True
     DRAW_MAX_ITERS: int = 12
     DRAW_TIMEOUT: int = 1800
-    DRAW_MODEL: Optional[str] = "claude-opus-5"
-    DRAW_EFFORT: Optional[str] = "low"
+    DRAW_MODEL: str | None = "claude-opus-5"
+    DRAW_EFFORT: str | None = "low"
     # Publish a cell into implementation/cells/ even when it lost the
     # area/delay comparison against the abutted PDK baseline.
     DRAW_PUBLISH_ON_LOSS: bool = True
@@ -170,7 +169,7 @@ class Config:
     #                    (0.48 um each). 32 sites is ~15 um: the cell plus
     #                    three or four neighbours on either side.
     RENDER_WIDTH: int = 2400
-    RENDER_HEIGHT: Optional[int] = None
+    RENDER_HEIGHT: int | None = None
     RENDER_ZOOM_SITES: int = 32
 
     # =====================================================================
@@ -209,8 +208,11 @@ class Config:
         "DRAW_EFFORT": ("low", "medium", "high", "xhigh", "max", "none"),
         "ELITE_METRIC": ("saved-area", "occurrences", "saved-area-per-cell"),
         "MINIMIZER_MODE": ("transistor", "area", "balance"),
-        "SDF_CORNER": ("nom_typ_1p20V_25C", "nom_fast_1p32V_m40C",
-                       "nom_slow_1p08V_125C"),
+        "SDF_CORNER": (
+            "nom_typ_1p20V_25C",
+            "nom_fast_1p32V_m40C",
+            "nom_slow_1p08V_125C",
+        ),
     }
 
     def apply(self, assignments) -> None:
@@ -227,8 +229,7 @@ class Config:
             text = value.strip()
             allowed = self.CHOICES.get(name)
             if allowed is not None and text not in allowed:
-                raise ValueError(
-                    f"{name}={text!r} is not one of: {', '.join(allowed)}")
+                raise ValueError(f"{name}={text!r} is not one of: {', '.join(allowed)}")
             setattr(self, name, _coerce(known[name].type, text))
             self._overrides[name] = text
 

@@ -23,10 +23,11 @@
 #  would mean a run that reports "checked against Universal" while checking
 #  against something else.
 #
-#  Arithmetic is done IN the posit type, not in double.  For Posit<16,2> the
-#  two agree -- a double has enough mantissa to make one rounding step exact
-#  -- but that is a property of this size, not a rule, and it stops being
-#  true the moment anyone tries Posit<32,2> or a fused operation.
+#  Arithmetic is done IN the posit type, not in double.  At Posit<16,2> the
+#  two agreed -- a double has enough mantissa to make one rounding step exact
+#  -- but that was a property of that size, not a rule, and the design is now
+#  Posit<32,2>, whose 27-bit fraction leaves a double no room to spare on the
+#  wide products.  Decode-operate-re-encode is not a valid reference here.
 # ================================================================
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_NBITS = 16
+DEFAULT_NBITS = 32
 DEFAULT_ES = 2
 
 #: Where `make universal` puts the shim, and the escape hatch for a build
@@ -178,7 +179,7 @@ eq = _predicate("up_eq")
 
 
 def isnar(bits: int, nbits: int = DEFAULT_NBITS, es: int = DEFAULT_ES) -> bool:
-    """Is this the Not-a-Real encoding? (0x8000 for a 16-bit posit.)"""
+    """Is this the Not-a-Real encoding? (0x80000000 for a 32-bit posit.)"""
     lib = _load()
     out = ctypes.c_int()
     _check(lib.up_isnar(nbits, es, int(bits), ctypes.byref(out)), nbits, es)
@@ -228,7 +229,7 @@ if __name__ == "__main__":
 
     def usage() -> None:
         print("Usage: python posit.py <decimal> [n_bits] [es]")
-        print("Example: python posit.py 3.14159265358979 16 2")
+        print("Example: python posit.py 3.14159265358979 32 2")
         sys.exit(1)
 
     if len(sys.argv) < 2:

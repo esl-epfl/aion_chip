@@ -17,7 +17,6 @@ filesets:
       - src/rtl/mult.vhd
       - src/rtl/posit_compare.vhd
       - src/rtl/posit_bitwise.vhd
-      - src/rtl/posit_mac.vhd
       - src/rtl/posit_alu.vhd
       - src/rtl/aion_soc.vhd
       - src/rtl/aion_interface.vhd

@@ -18,7 +18,7 @@ The floorplan is **not** TT's any more. This design is hardened to be
 instantiated twice in a top level that lives in another repository, so TT's
 tile `DIE_AREA` and its DEF template — which pins all 43 pins to the north edge
 for the multiplexer — would both be the wrong shape. `DIE_AREA` is a plain
-**350 x 200 um** box and pin placement falls back to `pin_order.cfg`, which
+**660 x 210 um** box and pin placement falls back to `pin_order.cfg`, which
 spreads the pins over all four sides.
 
 What is kept is everything that is a *rule* rather than a floorplan, because
@@ -39,87 +39,58 @@ wanted again: set `LIBRELANE_DEF_TEMPLATE` to it and change `DIE_AREA` to that
 tile's row of TT's `tile_sizes.yaml` — the two have to agree, and nothing checks
 it for you.
 
-## The MAC array
+## What the Posit<32,2> ALU costs
 
-`MAC_LANES` is the one knob that sizes this macro. It is a VHDL generic on
-`tt_um_aion`, defaulting to **1**, and it decides how many posit multiply-
-accumulate lanes the chip carries.
+The design is one `PositAdder`, one `PositMult`, a comparator and a bitwise
+unit — no MAC array and no size generic any more. What sizes this macro is the
+posit width, and it is not a free parameter: it is what the arithmetic is.
 
-```vhdl
--- src/rtl/tt_um_aion.vhd
-MAC_LANES : positive := 1
-```
+Measured through `make synth` on the IHP SG13G2 typical corner, with each unit
+also synthesised alone (`yosys … stat -liberty sg13g2_stdcell_typ_1p20V_25C`):
 
-Change it there for simulation, or override it for a hardening run without
-touching the RTL by adding the generic to `GHDL_ARGUMENTS` in `config.json`:
+| | Posit<16,2> | Posit<32,2> | Factor |
+| --- | ---: | ---: | ---: |
+| `PositAdder` | 8,850 um² | 21,663 um² | 2.4x |
+| `PositMult` | 19,781 um² | 61,864 um² | 3.1x |
+| whole design | 36,631 um² | **89,140 um²** | 2.4x |
+| instances | — | 7,744 | |
 
-```json
-"GHDL_ARGUMENTS": "--std=08 -fsynopsys -fexplicit -gMAC_LANES=2"
-```
+The multiplier is the whole story. A Posit<16,2> fraction multiply is one
+DSP-shaped block; a Posit<32,2> one is a 29 x 29 partial-product array with a
+compressor tree, which is why `mult.vhd` grew from 732 lines to 2,113 and why
+it alone is 69% of the chip.
 
-(FuseSoC cannot pass it: its GHDL backend rejects `paramtype: generic`. The
-cocotb testbench does not need telling — `test_mac_lanes_are_independent`
-discovers how many lanes exist, because a lane that was never built reads back
-zero.)
+### It does not fit 660 x 210
 
-### What each lane costs
+**`make pnr_simple` fails on this floorplan.** The numbers, from that run:
 
-A lane is a `PositMult` (19,781 um²) and a `PositAdder` (8,850 um²). Measured
-through `make synth`, and the reason `MAC_LANES` is the knob that decides the
-die:
+| | |
+| --- | --- |
+| Cell area | 89,140 um² |
+| Core area (`CORE_AREA` 9.6, 11.34 → 650.4, 200.34) | 121,111 um² |
+| Utilisation OpenROAD reports | 82.5% |
+| Minimum feasible density (`GPL-1004`) | 0.83 |
+| `PL_TARGET_DENSITY_PCT` in `config.json` | 45 |
 
-| Lanes | Cell area | Utilisation in 350 x 200 | Min core at 60% | Box |
-| ---: | ---: | ---: | ---: | --- |
-| 1 | 36,631 um² | 55% | 61,052 um² | **350 x 200** ✓ |
-| 2 | 71,066 um² | 107% | 118,443 um² | ~450 x 265 |
-| 3 | 105,501 um² | 159% | 175,835 um² | ~545 x 325 |
-| 4 | 139,936 um² | 211% | 233,227 um² | ~630 x 370 |
+Global placement warns `GPL-0302: Target density 0.4500 is too low for the
+available free area`, and detailed placement then fails outright —
+`DPL-0036`, on 210 instances. Raising `PL_TARGET_DENSITY_PCT` to something
+above 0.83 is not the fix: the design would be placed at a density where
+routing this PDK is not realistic. The box has to grow.
 
-A 350 x 200 box holds **one lane**. Anything more needs `DIE_AREA` to grow with
-it; there is no check that they agree, and global placement will simply fail.
+Keeping the 50-row core height (189 um, the row pitch is 3.78 um) and the
+19.2 um of left/right margin, the width needed is:
 
-`MAC_LANES=1` is not a degenerate case — it is the design as it was before the
-array existed. Lane 0 carries the only adder and multiplier in the chip, and
-the plain add and multiply opcodes bypass into it rather than owning a second
-pair. That is what keeps one lane affordable; without the bypass, `MAC_LANES=1`
-would have been two of everything.
+| Target core utilisation | Core area needed | Core width | `DIE_AREA` width |
+| ---: | ---: | ---: | --- |
+| 60% | 148,567 um² | 786.24 um | **805.44** |
+| 55% | 162,073 um² | 857.76 um | **876.96** |
+| 50% | 178,280 um² | 943.68 um | **962.88** |
 
-### Using it
-
-The MAC reuses the existing register map. `reg_control` bits 6:4 — the only
-field that was free — select the lane; bits 3:0 carry the opcode; bit 7 fires
-the command, as before.
-
-| Opcode | Name | Effect |
-| --- | --- | --- |
-| `1000` | `MAC_LOAD` | latch `opA`/`opB` as lane `sel`'s operands |
-| `1001` | `MAC_RUN` | every lane accumulates: `acc += x * y` |
-| `1010` | `MAC_CLEAR` | zero every accumulator |
-| `1011` | `MAC_READ` | read lane `sel`'s accumulator, disturbing nothing |
-
-Every MAC opcode leaves the selected accumulator on `result` (`0x5`/`0x6`), so
-each of them is also a read. A dot product is: `MAC_CLEAR`, then for each term
-`MAC_LOAD` into its lane, then one `MAC_RUN` — which advances **all** lanes at
-once — and `MAC_READ` per lane.
-
-```
-write 0x0/0x1 = opA        write 0x2/0x3 = opB
-write 0x4     = 0x80 | (lane << 4) | opcode
-poll  0x7     until bit 0 (done)
-read  0x5/0x6 = the selected accumulator
-```
-
-Two timing details that are not obvious:
-
-* a MAC accumulate raises `done` **three** cycles after the write, not two. The
-  multiply and the add are both combinational and together are the longest path
-  in the chip, so a lane never puts them in one cycle: `RUN` registers the
-  product, and the cycle after it the sum lands in the accumulator. The extra
-  cycle before that is because `start` is combinational off `ui_in` while
-  `reg_control` is registered — the pulse and its own opcode only agree one
-  cycle later. The plain opcodes still raise `done` after two;
-* `MAC_CLEAR` beats `MAC_RUN`: a clear issued during an accumulate leaves the
-  lane at zero rather than at half a result.
+Each width is a whole number of 0.48 um `CoreSite` steps (1678, 1827 and 2006
+sites). `CORE_AREA` has to move with `DIE_AREA` — nothing checks that the two
+agree, and global placement simply fails when they do not. Growing the height
+instead is equally valid; it has to come in whole 3.78 um rows.
 
 ## Targets
 

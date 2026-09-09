@@ -11,12 +11,6 @@ library ieee;
 library work;
 
 entity tt_um_aion is
-  generic (
-    -- Lanes in the MAC array. The one knob that sizes this macro: 1 is the
-    -- design as it was, and every further lane adds a posit multiplier and
-    -- adder (~28,900 um2). See implementation/README.md for what fits.
-    MAC_LANES : positive := 1
-  );
   port (
     clk     : in  std_ulogic;
     rst_n   : in  std_ulogic;
@@ -39,16 +33,13 @@ architecture arch of tt_um_aion is
   signal unused : std_ulogic;
 
   component aion_soc is
-    generic (
-      MAC_LANES : positive
-    );
     port (
       clk     : in  std_logic;
       rst_n   : in  std_logic;
       ui_in   : in  std_ulogic_vector(7 downto 0);
       uio_in  : in  std_ulogic_vector(7 downto 0);
       uo_out  : out std_ulogic_vector(7 downto 0);
-      result  : out std_logic_vector(15 downto 0);
+      result  : out std_logic_vector(31 downto 0);
       done    : out std_logic
     );
   end component aion_soc;
@@ -74,9 +65,6 @@ begin
   -- AION SoC instance (contains register interface + compute core)
   -- ----------------------------------------------------------------
   aion_soc_inst : component aion_soc
-    generic map (
-      MAC_LANES => MAC_LANES
-    )
     port map (
       clk    => std_logic(clk),
       rst_n  => std_logic(rst_n),

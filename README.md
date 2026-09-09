@@ -20,7 +20,7 @@ aion_flow/          submodule: the AI cell tools (aion_opt, aion_char,
                     aion_minimizer, aion_layout) the flow drives
 
 docs/architecture.md  what is inside the chip and how to drive each block
-src/rtl/            VHDL sources (MAC_LANES sizes the design — see below)
+src/rtl/            VHDL sources (Posit<32,2> ALU + register interface)
 src/tb/             cocotb testbenches
 src/misc/           dump_waves.v, sdf_annotate.v — extra roots for the Icarus runs
 tech/               IHP SG13G2 cell views and their simulation models
@@ -106,16 +106,18 @@ Only `include/` is fetched, sparse and blobless and pinned to a release tag:
 `UNIVERSAL_ROOT=` to build against a copy you already have installed.
 
 Arithmetic happens **in** the posit type. Decoding to `float`, operating
-there and re-encoding agrees at Posit<16,2> — a double has enough mantissa to
-make one rounding step exact — but that is a property of this width, not a
-rule.
+there and re-encoding agreed at Posit<16,2> — a double has enough mantissa to
+make one rounding step exact — but that was a property of that width, not a
+rule, and the design is Posit<32,2> now. Its 27-bit fraction leaves a double
+no room to spare on the wide products, so decode-operate-re-encode is not a
+valid reference any more.
 
 An exact reference makes the ends of the range testable, so the testbenches
 sweep them: `POSIT_EDGE_CASES` crosses zero, ±one, ±minpos, ±maxpos, NaR and
-the four truncated-exponent patterns with each other (144 pairs per operation,
-44 of which saturate), NaR propagation is asserted directly on both operand
-positions, and the random tests draw **encodings** rather than floats from a
-narrow range. The old model decoded four of those patterns to half their true
+the four truncated-exponent patterns with each other (144 pairs per
+operation), NaR propagation is asserted directly on both operand positions,
+and the random tests draw **encodings** rather than floats from a narrow
+range. A hand-written model decodes four of those patterns to half their true
 value, so nothing could be checked against them.
 
 GHDL is the only simulator that reads the VHDL, so RTL simulation has exactly
@@ -174,8 +176,11 @@ testbench asks for.
 with the right arguments, and they still work by hand. `make pnr_simple` is
 the PDK-only baseline the AI flow is measured against — it belongs to no step.
 
-The die is a plain **350 × 200 µm** box, hardened as a macro for a parent to
-instantiate rather than as a TinyTapeout tile. The TT *rules* are still
+The die is a plain **660 × 210 µm** box, hardened as a macro for a parent to
+instantiate rather than as a TinyTapeout tile — and, since the move to
+Posit<32,2>, **too small for the design**: see
+[`implementation/README.md`](implementation/README.md#what-the-posit322-alu-costs).
+The TT *rules* are still
 honoured — the `tt_um_*` port list, `VPWR`/`VGND`, and the layer restrictions
 that keep the GDS submittable — but not TT's floorplan. See
 [`implementation/README.md`](implementation/README.md), which says which is
@@ -219,34 +224,29 @@ for the posit reference model (see above).
 | **Chip Name**             | AION                                         |
 | **Module Name**           | `tt_um_aion`                                 |
 | **Process / Platform**    | IHP SG13G2 130 nm SiGe BiCMOS (Tiny Tapeout) |
-| **Die**                   | 350 µm × 200 µm (hardened as a macro)        |
-| **Reference Clock Input** | 1 MHz – 25 MHz (`clk`, 40 ns signoff period) |
+| **Arithmetic**            | Posit<32,2>                                  |
+| **Die**                   | 660 µm × 210 µm (hardened as a macro)        |
+| **Reference Clock Input** | 1 MHz – 20 MHz (`clk`, 50 ns signoff period) |
 
 ---
 
-## The MAC array
+## The arithmetic
 
-`MAC_LANES`, a VHDL generic on `tt_um_aion`, decides how many posit
-multiply-accumulate lanes the chip carries. It defaults to **1**, which is the
-design as it was: lane 0 holds the only adder and multiplier, and the plain
-arithmetic opcodes bypass into it.
+AION computes on **Posit<32,2>**. One `PositAdder` and one `PositMult`,
+FloPoCo-generated and one pipeline stage deep, plus a comparator and a bitwise
+unit — no MAC array, no lanes, no accumulator.
 
-Each further lane is a whole posit multiplier and adder — about 34,400 µm² —
-so this generic, not the RTL, is what sizes the die. One lane fills 55% of a
-350 × 200 core; two do not fit in it at all. The table in
-[`implementation/README.md`](implementation/README.md#what-each-lane-costs)
-gives the box each lane count needs.
-
-The lanes exist to make the AI-generated cell library measurable. Every lane is
-structurally identical, so N lanes multiply the number of sites each mined cell
-covers without adding one new cell type to draw — which is the only lever that
-moves coverage and drawing cost in opposite directions.
+Doubling the word width from Posit<16,2> is what sizes the die: the multiplier
+went from 19,781 µm² to 61,864 µm² and the adder from 8,850 µm² to 21,663 µm²,
+so the whole design is now 89,140 µm² over 7,744 cells. That does not fit the
+660 × 210 box — see
+[`implementation/README.md`](implementation/README.md#what-the-posit322-alu-costs).
 
 ## Register Interface
 
 [`docs/architecture.md`](docs/architecture.md) is the full reference — every
-block, the opcode map, the MAC array and the command sequences. What follows is
-the short version.
+block, the opcode map and the command sequences. What follows is the short
+version.
 
 The `tt_um_aion` wrapper exposes the AION posit arithmetic unit through a simple byte-wide register file. The register logic is implemented in `aion_interface.vhd` and is connected to the `aion_soc` compute core.
 
@@ -254,29 +254,33 @@ The `tt_um_aion` wrapper exposes the AION posit arithmetic unit through a simple
 
 | Pin group | Direction | Purpose                              |
 | --------- | --------- | ------------------------------------ |
-| `ui_in`   | Input     | `ui_in[2:0]` = register address, `ui_in[7]` = R/W direction (`1` = write, `0` = read) |
+| `ui_in`   | Input     | `ui_in[3:0]` = register address, `ui_in[7]` = R/W direction (`1` = write, `0` = read) |
 | `uio_in`  | Input     | Write data byte                      |
 | `uo_out`  | Output    | Read data byte                       |
 | `ena`     | Input     | Required by the TinyTapeout harness; AION does not use it |
 
 ### Register Map
 
-| Address | Name         | Access | Description                                      |
-| ------- | ------------ | ------ | ------------------------------------------------ |
-| `0x0`   | `opA_lo`     | R/W    | Operand A, low byte                              |
-| `0x1`   | `opA_hi`     | R/W    | Operand A, high byte                             |
-| `0x2`   | `opB_lo`     | R/W    | Operand B, low byte                              |
-| `0x3`   | `opB_hi`     | R/W    | Operand B, high byte                             |
-| `0x4`   | `control`    | R/W    | Control register (`bit[0]` = opcode, `bit[1]` = start trigger) |
-| `0x5`   | `result_lo`  | R      | Result, low byte                                 |
-| `0x6`   | `result_hi`  | R      | Result, high byte                                |
-| `0x7`   | `status`     | R      | `status[0]` = `done` flag                        |
+A Posit<32,2> operand is four bytes, so the map spans fourteen addresses
+instead of eight. Operands and results are little-endian.
 
-- Opcode (`control[3:0]`): `0` add, `1` multiply, `2`–`3` compare, `4`–`6` bitwise,
-  `8`–`11` the MAC array (load / run / clear / read).
-- `control[6:4]` selects the MAC lane; `control[7]` fires the command.
-- A MAC accumulate raises `done` three cycles after the write rather than two —
-  see [`implementation/README.md`](implementation/README.md#the-mac-array).
+| Address     | Name          | Access | Description                                |
+| ----------- | ------------- | ------ | ------------------------------------------ |
+| `0x0`–`0x3` | `opA_b0..b3`  | R/W    | Operand A, low byte first                  |
+| `0x4`–`0x7` | `opB_b0..b3`  | R/W    | Operand B, low byte first                  |
+| `0x8`       | `control`     | R/W    | Control register — opcode + start trigger  |
+| `0x9`–`0xC` | `result_b0..b3` | R    | Result, low byte first                     |
+| `0xD`       | `status`      | R      | `status[0]` = `done` flag                  |
+| `0xE`–`0xF` | —             | R      | Unmapped, read `0x00`                      |
+
+- Opcode (`control[3:0]`): `0` add, `1` multiply, `2`–`3` compare,
+  `4`–`6` bitwise. Everything else drives a zero result.
+- `control[7]` fires the command; `control[6:4]` is unused (it was the MAC lane
+  select before the MAC array was removed).
+- `done` is a completion level, not a pulse: the write to `control` clears it
+  and it rises one clock edge later, when the result is settled, then holds
+  until the next command. Polling it late is safe; polling it immediately
+  cannot be answered by the previous operation.
 
 ### Reading the diagrams
 
@@ -301,10 +305,10 @@ start   ____________________________/‾‾‾‾‾‾‾‾‾‾‾‾‾\___
                                     this edge writes the register
 ```
 
-1. Drive `ui_in` with `{1'b1, 4'b0, address}` — bit 7 high selects a write.
+1. Drive `ui_in` with `{1'b1, 3'b0, address}` — bit 7 high selects a write.
 2. Drive `uio_in` with the byte to write.
 3. Hold both across one rising edge. The register updates on that edge.
-4. A write to `control` (`0x4`) with `bit[1] = 1` also raises `start` for
+4. A write to `control` (`0x8`) with `bit[7] = 1` also raises `start` for
    exactly one cycle, which is what kicks off a computation. `start` is a
    pulse, not a level: it falls again whether or not you keep driving `ui_in`.
 
@@ -324,14 +328,14 @@ uo_out  ---------------<      register value     >--------------
                        is only valid while `ui_in` is held
 ```
 
-1. Drive `ui_in` with `{1'b0, 4'b0, address}` — bit 7 low selects a read.
+1. Drive `ui_in` with `{1'b0, 3'b0, address}` — bit 7 low selects a read.
 2. The selected register appears on `uo_out`. Sample it while `ui_in` is
    still driven; drop `ui_in` and `uo_out` stops being meaningful.
 
 ### Typical Operation Flow
 
-1. Write operand A to `0x0` and `0x1`.
-2. Write operand B to `0x2` and `0x3`.
-3. Write `control` (`0x4`) with the desired opcode and `bit[1] = 1` to start.
-4. Poll `status` (`0x7`) until `done` is high.
-5. Read result from `0x5` and `0x6`.
+1. Write operand A to `0x0`–`0x3`, low byte first.
+2. Write operand B to `0x4`–`0x7`, low byte first.
+3. Write `control` (`0x8`) with the desired opcode and `bit[7] = 1` to start.
+4. Poll `status` (`0xD`) until `done` is high.
+5. Read the result from `0x9`–`0xC`, low byte first.

@@ -12,10 +12,10 @@ library work;
 
 entity posit_bitwise is
   port (
-    x      : in  std_logic_vector(15 downto 0);
-    y      : in  std_logic_vector(15 downto 0);
+    x      : in  std_logic_vector(31 downto 0);
+    y      : in  std_logic_vector(31 downto 0);
     op     : in  std_logic_vector(1 downto 0);  -- 00=AND, 01=OR, 10=XOR
-    result : out std_logic_vector(15 downto 0)
+    result : out std_logic_vector(31 downto 0)
   );
 end entity posit_bitwise;
 

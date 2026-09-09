@@ -13,10 +13,10 @@ library work;
 
 entity posit_compare is
   port (
-    x      : in  std_logic_vector(15 downto 0);
-    y      : in  std_logic_vector(15 downto 0);
+    x      : in  std_logic_vector(31 downto 0);
+    y      : in  std_logic_vector(31 downto 0);
     op     : in  std_logic;                     -- '0'=EQ, '1'=LT
-    result : out std_logic_vector(15 downto 0)
+    result : out std_logic_vector(31 downto 0)
   );
 end entity posit_compare;
 

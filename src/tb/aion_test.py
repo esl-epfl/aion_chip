@@ -23,20 +23,13 @@ OPCODE_AND = 0b0100
 OPCODE_OR = 0b0101
 OPCODE_XOR = 0b0110
 
-# MAC array. reg_control(6:4) selects the lane, so a MAC command is
-# (lane << 4) | opcode, plus bit 7 to fire it.
-OPCODE_MAC_LOAD = 0b1000
-OPCODE_MAC_RUN = 0b1001
-OPCODE_MAC_CLEAR = 0b1010
-OPCODE_MAC_READ = 0b1011
-
-# reg_control(6:4) is three bits, so at most eight lanes are addressable. How
-# many actually exist is a generic, and the test discovers it rather than being
-# told: the read multiplexer returns zero for a lane that was never built.
-MAC_MAX_LANES = 8
-
-POSIT_NBITS = 16
+POSIT_NBITS = 32
 POSIT_ES = 2
+POSIT_MASK = (1 << POSIT_NBITS) - 1
+POSIT_BYTES = POSIT_NBITS // 8
+
+#: Width for the hex in every log line and assertion message.
+HEX = POSIT_NBITS // 4
 
 # Fixed integer test patterns
 OP_A_INT_FIXED = [1, 2, 100]
@@ -46,37 +39,37 @@ OP_B_INT_FIXED = [3, 6, 20]
 OP_A_FLOAT_FIXED = [0.0, 0.1, 0.5, 3.1]
 OP_B_FLOAT_FIXED = [2.5, 3.2, 12.2, 6.0]
 
-# Posit<16,2> bit patterns worth naming, crossed with each other below.
+# Posit<32,2> bit patterns worth naming, crossed with each other below.
 #
-# The last four are the ones the previous hand-written reference model got
-# wrong: their exponent field runs off the end of the word, so the missing
-# bits have to be read as zeros, and the old model read them as absent
-# instead -- every one of them decoded to half its true value. A reference
-# that is wrong at the ends of the range cannot fail there, so the hardware
-# was never actually checked against them.
+# The last four are the ones a hand-written reference model gets wrong: their
+# exponent field runs off the end of the word, so the missing bits have to be
+# read as zeros, and a model that reads them as absent decodes every one of
+# them to half its true value. A reference that is wrong at the ends of the
+# range cannot fail there, so the hardware would never actually be checked
+# against them -- which is why the reference here is Stillwater Universal.
 POSIT_EDGE_CASES = (
-    (0x0000, "zero"),
-    (0x4000, "one"),
-    (0xC000, "-one"),
-    (0x0001, "minpos"),
-    (0xFFFF, "-minpos"),
-    (0x7FFF, "maxpos"),
-    (0x8001, "-maxpos"),
-    (0x8000, "NaR"),
-    (0x0003, "small, truncated exponent"),
-    (0xFFFD, "-small, truncated exponent"),
-    (0x7FFD, "large, truncated exponent"),
-    (0x8003, "-large, truncated exponent"),
+    (0x00000000, "zero"),
+    (0x40000000, "one"),
+    (0xC0000000, "-one"),
+    (0x00000001, "minpos"),
+    (0xFFFFFFFF, "-minpos"),
+    (0x7FFFFFFF, "maxpos"),
+    (0x80000001, "-maxpos"),
+    (0x80000000, "NaR"),
+    (0x00000003, "small, truncated exponent"),
+    (0xFFFFFFFD, "-small, truncated exponent"),
+    (0x7FFFFFFD, "large, truncated exponent"),
+    (0x80000003, "-large, truncated exponent"),
 )
 
-REG_OP_A_LO = 0
-REG_OP_A_HI = 1
-REG_OP_B_LO = 2
-REG_OP_B_HI = 3
-REG_CONTROL = 4
-REG_RESULT_LO = 5
-REG_RESULT_HI = 6
-REG_STATUS = 7
+# Register map. A Posit<32,2> operand is four bytes, so the map spans fourteen
+# addresses and `ui_in[3:0]` carries the address (it was `ui_in[2:0]` for the
+# eight-register Posit<16,2> map).
+REG_OP_A = 0x0  # 0x0 .. 0x3, little-endian
+REG_OP_B = 0x4  # 0x4 .. 0x7, little-endian
+REG_CONTROL = 0x8
+REG_RESULT = 0x9  # 0x9 .. 0xC, little-endian
+REG_STATUS = 0xD
 
 CLK_PERIOD_NS = 50
 
@@ -92,24 +85,49 @@ async def reset(dut):
 
 
 async def write_reg(dut, addr, data):
-    dut.ui_in.value = 0x80 | (addr & 0x07)
+    dut.ui_in.value = 0x80 | (addr & 0x0F)
     dut.uio_in.value = data & 0xFF
     await RisingEdge(dut.clk)
-    dut.ui_in.value = addr & 0x07
+    dut.ui_in.value = addr & 0x0F
     dut.uio_in.value = 0
 
 
 async def read_reg(dut, addr):
-    dut.ui_in.value = addr & 0x07
+    dut.ui_in.value = addr & 0x0F
     await RisingEdge(dut.clk)
     return int(dut.uo_out.value)
 
 
+async def write_operand(dut, base, value):
+    """Write one 32-bit operand, low byte first."""
+    for i in range(POSIT_BYTES):
+        await write_reg(dut, base + i, (value >> (8 * i)) & 0xFF)
+
+
+async def read_result(dut):
+    """Read the 32-bit result register, low byte first."""
+    value = 0
+    for i in range(POSIT_BYTES):
+        value |= (await read_reg(dut, REG_RESULT + i)) << (8 * i)
+    return value
+
+
+async def probe_status(dut, addr=None):
+    """Sample `status` mid-cycle, where the level is unambiguous.
+
+    `read_reg` samples on a rising edge, which is exactly when `done` changes;
+    which side of that edge cocotb reads is not something a test about the
+    handshake should depend on. This waits for the falling edge instead, so the
+    assertion is about the level during a named cycle.
+    """
+    dut.ui_in.value = REG_STATUS if addr is None else addr
+    await FallingEdge(dut.clk)
+    return int(dut.uo_out.value)
+
+
 async def compute_posit(dut, opA, opB, opcode):
-    await write_reg(dut, REG_OP_A_LO, opA)
-    await write_reg(dut, REG_OP_A_HI, opA >> 8)
-    await write_reg(dut, REG_OP_B_LO, opB)
-    await write_reg(dut, REG_OP_B_HI, opB >> 8)
+    await write_operand(dut, REG_OP_A, opA)
+    await write_operand(dut, REG_OP_B, opB)
     await write_reg(dut, REG_CONTROL, (opcode & 0x0F) | 0x80)
 
     while True:
@@ -117,32 +135,7 @@ async def compute_posit(dut, opA, opB, opcode):
         if status & 0x01:
             break
 
-    result_lo = await read_reg(dut, REG_RESULT_LO)
-    result_hi = await read_reg(dut, REG_RESULT_HI)
-    return (result_hi << 8) | result_lo
-
-
-async def mac_command(dut, opcode, lane=0, opA=None, opB=None):
-    """Issue one MAC command and return the selected lane's accumulator.
-
-    Every MAC opcode leaves the accumulator on `result`, so the read-back is
-    the same sequence for LOAD, RUN, CLEAR and READ.
-    """
-    if opA is not None:
-        await write_reg(dut, REG_OP_A_LO, opA)
-        await write_reg(dut, REG_OP_A_HI, opA >> 8)
-    if opB is not None:
-        await write_reg(dut, REG_OP_B_LO, opB)
-        await write_reg(dut, REG_OP_B_HI, opB >> 8)
-
-    await write_reg(dut, REG_CONTROL, ((lane & 0x07) << 4) | (opcode & 0x0F) | 0x80)
-    while True:
-        if (await read_reg(dut, REG_STATUS)) & 0x01:
-            break
-
-    result_lo = await read_reg(dut, REG_RESULT_LO)
-    result_hi = await read_reg(dut, REG_RESULT_HI)
-    return (result_hi << 8) | result_lo
+    return await read_result(dut)
 
 
 def _to_posit(value: float) -> int:
@@ -165,15 +158,15 @@ async def _run_arith_pairs(dut, opcode, pairs, op_name, quiet=False):
 
         if not quiet:
             dut._log.info(
-                f"{op_name}[{i}]: 0x{op_a:04X} {symbol} 0x{op_b:04X} "
-                f"result=0x{result:04X} expected=0x{expected:04X}"
+                f"{op_name}[{i}]: 0x{op_a:0{HEX}X} {symbol} 0x{op_b:0{HEX}X} "
+                f"result=0x{result:0{HEX}X} expected=0x{expected:0{HEX}X}"
             )
         if result != expected:
             raise AssertionError(
                 f"{op_name}[{i}] mismatch: "
-                f"0x{op_a:04X} ({posit.decode(op_a, POSIT_NBITS, POSIT_ES)!r}) "
-                f"{symbol} 0x{op_b:04X} ({posit.decode(op_b, POSIT_NBITS, POSIT_ES)!r}): "
-                f"got 0x{result:04X}, expected 0x{expected:04X}"
+                f"0x{op_a:0{HEX}X} ({posit.decode(op_a, POSIT_NBITS, POSIT_ES)!r}) "
+                f"{symbol} 0x{op_b:0{HEX}X} ({posit.decode(op_b, POSIT_NBITS, POSIT_ES)!r}): "
+                f"got 0x{result:0{HEX}X}, expected 0x{expected:0{HEX}X}"
             )
     if quiet:
         dut._log.info(f"{op_name}: {len(pairs)} pair(s) match Universal")
@@ -195,13 +188,14 @@ async def _run_fixed_tests(dut, opcode, op_a_list, op_b_list, op_name):
 
         dut._log.info(
             f"{op_name}[{i}]: {a} {('*' if opcode == OPCODE_MULT else '+')} {b} "
-            f"opA=0x{op_a:04X} opB=0x{op_b:04X} "
-            f"result=0x{result:04X} expected=0x{expected:04X}"
+            f"opA=0x{op_a:0{HEX}X} opB=0x{op_b:0{HEX}X} "
+            f"result=0x{result:0{HEX}X} expected=0x{expected:0{HEX}X}"
         )
 
         if result != expected:
             raise AssertionError(
-                f"{op_name}[{i}] mismatch: got 0x{result:04X}, expected 0x{expected:04X}"
+                f"{op_name}[{i}] mismatch: got 0x{result:0{HEX}X}, "
+                f"expected 0x{expected:0{HEX}X}"
             )
 
 
@@ -225,14 +219,14 @@ async def _run_compare_tests(dut, op_a_list, op_b_list, op_name, quiet=False):
             if not quiet:
                 dut._log.info(
                     f"{op_name}_{op_label}[{i}]: "
-                    f"opA=0x{op_a:04X} opB=0x{op_b:04X} "
-                    f"result=0x{result:04X} expected=0x{exp:04X}"
+                    f"opA=0x{op_a:0{HEX}X} opB=0x{op_b:0{HEX}X} "
+                    f"result=0x{result:0{HEX}X} expected=0x{exp:0{HEX}X}"
                 )
             if result != exp:
                 raise AssertionError(
                     f"{op_name}_{op_label}[{i}] mismatch for "
-                    f"0x{op_a:04X} vs 0x{op_b:04X}: "
-                    f"got 0x{result:04X}, expected 0x{exp:04X}"
+                    f"0x{op_a:0{HEX}X} vs 0x{op_b:0{HEX}X}: "
+                    f"got 0x{result:0{HEX}X}, expected 0x{exp:0{HEX}X}"
                 )
     if quiet:
         dut._log.info(f"{op_name}: {len(op_a_list)} pair(s) match Universal")
@@ -240,8 +234,8 @@ async def _run_compare_tests(dut, op_a_list, op_b_list, op_name, quiet=False):
 
 async def _run_bitwise_tests(dut, op_a_list, op_b_list, op_name):
     for i, (a, b) in enumerate(zip(op_a_list, op_b_list)):
-        op_a = a & 0xFFFF
-        op_b = b & 0xFFFF
+        op_a = a & POSIT_MASK
+        op_b = b & POSIT_MASK
 
         expected = {
             OPCODE_AND: op_a & op_b,
@@ -253,18 +247,105 @@ async def _run_bitwise_tests(dut, op_a_list, op_b_list, op_name):
             result = await compute_posit(dut, op_a, op_b, opcode)
             op_label = ["AND", "OR", "XOR"][opcode - OPCODE_AND]
             dut._log.info(
-                f"{op_name}_{op_label}[{i}]: 0x{op_a:04X} 0x{op_b:04X} "
-                f"result=0x{result:04X} expected=0x{exp:04X}"
+                f"{op_name}_{op_label}[{i}]: 0x{op_a:0{HEX}X} 0x{op_b:0{HEX}X} "
+                f"result=0x{result:0{HEX}X} expected=0x{exp:0{HEX}X}"
             )
             if result != exp:
                 raise AssertionError(
-                    f"{op_name}_{op_label}[{i}] mismatch: got 0x{result:04X}, expected 0x{exp:04X}"
+                    f"{op_name}_{op_label}[{i}] mismatch: got 0x{result:0{HEX}X}, "
+                    f"expected 0x{exp:0{HEX}X}"
                 )
 
 
 @cocotb.test()
+async def test_register_map(dut):
+    """Every operand byte is its own address, and reads back what was written.
+
+    A four-byte operand needs fourteen addresses where two-byte operands
+    needed eight, so this checks the widened decode directly rather than only
+    through an arithmetic result -- a byte lane wired to the wrong address
+    would otherwise only show up as a wrong posit.
+    """
+    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
+    await reset(dut)
+
+    op_a, op_b = 0x89ABCDEF, 0x01234567
+    await write_operand(dut, REG_OP_A, op_a)
+    await write_operand(dut, REG_OP_B, op_b)
+
+    for base, value, name in ((REG_OP_A, op_a, "opA"), (REG_OP_B, op_b, "opB")):
+        for i in range(POSIT_BYTES):
+            got = await read_reg(dut, base + i)
+            exp = (value >> (8 * i)) & 0xFF
+            assert got == exp, (
+                f"{name} byte {i} (addr {base + i:#x}): got {got:#04x}, "
+                f"expected {exp:#04x}"
+            )
+
+    # An address past the end of the map reads zero rather than aliasing onto
+    # a real register.
+    for addr in (0xE, 0xF):
+        got = await read_reg(dut, addr)
+        assert got == 0, f"unmapped address {addr:#x} read {got:#04x}, expected 0"
+
+    await FallingEdge(dut.clk)
+
+
+@cocotb.test()
+async def test_done_is_a_completion_level(dut):
+    """`done` reports completion: cleared on the command, raised when it is.
+
+    Two properties, and the arithmetic tests can check neither. They poll until
+    `done` and then read `result` -- but the result settles in the same cycle
+    the flag would have risen anyway, so a `done` that was a stale 1 left over
+    from the previous operation, or a one-cycle pulse, still hands them the
+    right answer. Only the handshake itself distinguishes them.
+    """
+    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
+    await reset(dut)
+
+    assert not ((await probe_status(dut)) & 0x01), (
+        "done was set out of reset, before anything had been computed"
+    )
+
+    op_a, op_b = _to_posit(3.0), _to_posit(4.0)
+    first = await compute_posit(dut, op_a, op_b, OPCODE_MULT)
+    assert first == posit.mul(op_a, op_b, POSIT_NBITS, POSIT_ES)
+
+    # It is a level, not a pulse: software that polls late still sees it.
+    for cycle in range(4):
+        assert (await probe_status(dut)) & 0x01, (
+            f"done dropped {cycle + 1} cycle(s) after completing; a poll that "
+            "arrives late would wait forever"
+        )
+
+    # A new command clears it on the edge that accepts the command.
+    new_a, new_b = _to_posit(5.0), _to_posit(6.0)
+    await write_operand(dut, REG_OP_A, new_a)
+    await write_operand(dut, REG_OP_B, new_b)
+    await write_reg(dut, REG_CONTROL, OPCODE_MULT | 0x80)
+
+    assert not ((await probe_status(dut)) & 0x01), (
+        "done was still set in the cycle after the command was accepted -- a "
+        "poll issued here is answered by the previous operation's flag"
+    )
+    assert (await probe_status(dut)) & 0x01, (
+        "done did not rise one cycle after the command was accepted"
+    )
+
+    got = await read_result(dut)
+    expected = posit.mul(new_a, new_b, POSIT_NBITS, POSIT_ES)
+    assert got == expected, (
+        f"result at the moment done rose is 0x{got:0{HEX}X}, expected "
+        f"0x{expected:0{HEX}X}"
+    )
+
+    await FallingEdge(dut.clk)
+
+
+@cocotb.test()
 async def test_posit_fixed_int_add(dut):
-    """Test Posit16 fixed integer addition"""
+    """Test Posit32 fixed integer addition"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -277,7 +358,7 @@ async def test_posit_fixed_int_add(dut):
 
 @cocotb.test()
 async def test_posit_fixed_int_mult(dut):
-    """Test Posit16 fixed integer multiplication"""
+    """Test Posit32 fixed integer multiplication"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -290,7 +371,7 @@ async def test_posit_fixed_int_mult(dut):
 
 @cocotb.test()
 async def test_posit_fixed_float_add(dut):
-    """Test Posit16 fixed float addition"""
+    """Test Posit32 fixed float addition"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -303,7 +384,7 @@ async def test_posit_fixed_float_add(dut):
 
 @cocotb.test()
 async def test_posit_fixed_float_mult(dut):
-    """Test Posit16 fixed float multiplication"""
+    """Test Posit32 fixed float multiplication"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -316,7 +397,7 @@ async def test_posit_fixed_float_mult(dut):
 
 @cocotb.test()
 async def test_posit_fixed_int_compare(dut):
-    """Test Posit16 fixed integer comparisons through register interface"""
+    """Test Posit32 fixed integer comparisons through register interface"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -332,7 +413,7 @@ async def test_posit_fixed_int_compare(dut):
 
 @cocotb.test()
 async def test_posit_fixed_int_bitwise(dut):
-    """Test Posit16 fixed integer bitwise ops through register interface"""
+    """Test Posit32 fixed integer bitwise ops through register interface"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -346,8 +427,9 @@ async def test_posit_edge_add_mult(dut):
     """Every named edge pattern against every other, ADD and MULT.
 
     Zero, one, minpos, maxpos, NaR and the four truncated-exponent patterns,
-    crossed: 144 pairs per operation. These are the values the old reference
-    model could not describe, so they were never checked.
+    crossed: 144 pairs per operation. These are the values a hand-written
+    reference model cannot describe, so without Universal they could not be
+    checked.
     """
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
@@ -374,7 +456,7 @@ async def test_posit_edge_nar_propagates(dut):
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    nar = 0x8000
+    nar = 0x80000000
     for value, label in POSIT_EDGE_CASES:
         for op_a, op_b, side in ((nar, value, "NaR op x"), (value, nar, "x op NaR")):
             for opcode, symbol in ((OPCODE_ADD, "+"), (OPCODE_MULT, "*")):
@@ -382,8 +464,8 @@ async def test_posit_edge_nar_propagates(dut):
                 if not posit.isnar(result, POSIT_NBITS, POSIT_ES):
                     raise AssertionError(
                         f"NaR did not propagate ({side}, {symbol}, x={label}): "
-                        f"0x{op_a:04X} {symbol} 0x{op_b:04X} = 0x{result:04X}, "
-                        f"expected 0x{nar:04X}"
+                        f"0x{op_a:0{HEX}X} {symbol} 0x{op_b:0{HEX}X} = "
+                        f"0x{result:0{HEX}X}, expected 0x{nar:0{HEX}X}"
                     )
     dut._log.info(
         f"NaR propagates through + and * for all "
@@ -410,7 +492,7 @@ async def test_posit_edge_compare(dut):
 
 @cocotb.test()
 async def test_posit_random_add_mult(dut):
-    """Test Posit16 random addition and multiplication"""
+    """Test Posit32 random addition and multiplication"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -432,7 +514,7 @@ async def test_posit_random_add_mult(dut):
 
 @cocotb.test()
 async def test_posit_random_compare(dut):
-    """Test Posit16 random comparisons through register interface"""
+    """Test Posit32 random comparisons through register interface"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
@@ -447,125 +529,14 @@ async def test_posit_random_compare(dut):
 
 @cocotb.test()
 async def test_posit_random_bitwise(dut):
-    """Test Posit16 random bitwise ops through register interface"""
+    """Test Posit32 random bitwise ops through register interface"""
     clock = Clock(dut.clk, CLK_PERIOD_NS, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
     rng = random.Random(42)
-    op_a_list = [rng.randint(0, 0xFFFF) for _ in range(20)]
-    op_b_list = [rng.randint(0, 0xFFFF) for _ in range(20)]
+    op_a_list = [rng.getrandbits(POSIT_NBITS) for _ in range(20)]
+    op_b_list = [rng.getrandbits(POSIT_NBITS) for _ in range(20)]
 
     await _run_bitwise_tests(dut, op_a_list, op_b_list, "RANDOM_BITWISE")
     await FallingEdge(dut.clk)
-
-
-# ----------------------------------------------------------------
-# MAC array
-#
-# The accumulator is posit arithmetic, so the reference has to accumulate in
-# the posit type too -- summing in float and encoding at the end rounds once
-# instead of once per step and disagrees with the hardware on the third term.
-# ----------------------------------------------------------------
-
-
-@cocotb.test()
-async def test_mac_single_lane_dot_product(dut):
-    """acc <- acc + x*y, one lane, checked against Universal step by step."""
-    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
-    await reset(dut)
-
-    pairs = [(1.0, 2.0), (0.5, 4.0), (3.0, 0.25), (2.5, -1.5)]
-
-    acc = await mac_command(dut, OPCODE_MAC_CLEAR)
-    assert acc == 0, f"CLEAR left the accumulator at {acc:#06x}, expected 0"
-
-    expected = 0
-    for i, (x, y) in enumerate(pairs):
-        op_a, op_b = _to_posit(x), _to_posit(y)
-        await mac_command(dut, OPCODE_MAC_LOAD, opA=op_a, opB=op_b)
-        acc = await mac_command(dut, OPCODE_MAC_RUN)
-
-        product = posit.mul(op_a, op_b, POSIT_NBITS, POSIT_ES)
-        expected = posit.add(expected, product, POSIT_NBITS, POSIT_ES)
-        assert acc == expected, (
-            f"MAC[{i}]: after {x} * {y} the accumulator is {acc:#06x} "
-            f"({posit.decode(acc, POSIT_NBITS, POSIT_ES)}), expected "
-            f"{expected:#06x} ({posit.decode(expected, POSIT_NBITS, POSIT_ES)})"
-        )
-
-    dut._log.info(
-        f"MAC dot product over {len(pairs)} terms = "
-        f"{posit.decode(acc, POSIT_NBITS, POSIT_ES)}"
-    )
-
-    acc = await mac_command(dut, OPCODE_MAC_CLEAR)
-    assert acc == 0, f"CLEAR after accumulating left {acc:#06x}, expected 0"
-
-
-@cocotb.test()
-async def test_mac_lanes_are_independent(dut):
-    """Each lane keeps its own operands and its own accumulator.
-
-    Loading is per-lane and RUN fires every lane at once, so this also checks
-    that one RUN advances all of them -- the property that makes an array worth
-    building rather than one unit used N times.
-
-    The lane count is a generic, so it is discovered here instead of asserted:
-    a lane that was never built reads back zero, and no lane in this test has
-    zero as its expected value.
-    """
-    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
-    await reset(dut)
-
-    await mac_command(dut, OPCODE_MAC_CLEAR)
-
-    # A different product per lane, so a lane reading another lane's state is a
-    # mismatch rather than a coincidence. None of them is zero.
-    operands = [(float(i + 1), 2.0) for i in range(MAC_MAX_LANES)]
-    for lane, (x, y) in enumerate(operands):
-        await mac_command(
-            dut, OPCODE_MAC_LOAD, lane=lane, opA=_to_posit(x), opB=_to_posit(y)
-        )
-
-    await mac_command(dut, OPCODE_MAC_RUN)
-
-    built = 0
-    for lane, (x, y) in enumerate(operands):
-        acc = await mac_command(dut, OPCODE_MAC_READ, lane=lane)
-        if acc == 0:
-            continue  # this lane was not built
-        built += 1
-        expected = posit.mul(_to_posit(x), _to_posit(y), POSIT_NBITS, POSIT_ES)
-        assert acc == expected, (
-            f"lane {lane}: accumulator {acc:#06x} after one RUN of {x} * {y}, "
-            f"expected {expected:#06x}"
-        )
-
-    assert built >= 1, "no MAC lane responded; lane 0 must always exist"
-    dut._log.info(f"{built} MAC lane(s) built, all accumulated on one RUN")
-
-
-@cocotb.test()
-async def test_mac_does_not_disturb_the_alu(dut):
-    """The ALU opcodes bypass into lane 0; that must not touch its state."""
-    cocotb.start_soon(Clock(dut.clk, CLK_PERIOD_NS, unit="ns").start())
-    await reset(dut)
-
-    op_a, op_b = _to_posit(3.0), _to_posit(4.0)
-    await mac_command(dut, OPCODE_MAC_CLEAR)
-    await mac_command(dut, OPCODE_MAC_LOAD, opA=op_a, opB=op_b)
-    acc_before = await mac_command(dut, OPCODE_MAC_RUN)
-
-    # Plain add and multiply run through lane 0's adder and multiplier.
-    other_a, other_b = _to_posit(7.0), _to_posit(9.0)
-    got_add = await compute_posit(dut, other_a, other_b, OPCODE_ADD)
-    got_mul = await compute_posit(dut, other_a, other_b, OPCODE_MULT)
-    assert got_add == posit.add(other_a, other_b, POSIT_NBITS, POSIT_ES)
-    assert got_mul == posit.mul(other_a, other_b, POSIT_NBITS, POSIT_ES)
-
-    acc_after = await mac_command(dut, OPCODE_MAC_READ)
-    assert acc_after == acc_before, (
-        f"the accumulator moved from {acc_before:#06x} to {acc_after:#06x} "
-        "while the ALU borrowed lane 0"
-    )

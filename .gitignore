@@ -26,6 +26,14 @@ flow/9_report/
 flow/pnr_simple/
 flow/logs/
 flow/coherence.json
+# scripts/explore_cells.py: the mining survey, the sweep and the library it
+# picks. Belongs to no step, same rule -- an output, not a source.
+flow/explore/
+# scripts/pdk_cell.py: testbenches, layout build and logs for the
+# hand-designed cells. The authored .v/.spice under implementation/ are
+# tracked; everything the script derives from them is not.
+flow/pdk_extension/
+implementation/pdk_extension/views/
 
 # the pre-rename output directories, so a tree that predates the numbered
 # step layout does not show hundreds of MB as untracked.
