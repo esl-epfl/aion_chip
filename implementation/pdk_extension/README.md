@@ -18,27 +18,50 @@ implementation/pdk_extension/
     <CELL>.spice             the hand-designed transistor implementation
     <CELL>.provisional.lib   Liberty for the mapper, before the cell is drawn
     FLOORPLAN.md             the placement/routing plan for the layout stage
-  views/<CELL>/              published by the flow script  (git-ignored)
+    ---- everything below is published by post-layout  (git-ignored) ----
+    <CELL>.lef  .lib  .gds   the views `make pnr` and `merge_lib.py` read
+    <CELL>.cdl               the netlist view
+    <CELL>.layout.v          the exporter's generated model
+    <CELL>.png               the drawn cell, rendered
 ```
+
+One directory per cell, sources and views together — the same shape step 6
+of the main flow publishes the mined cells in under `implementation/cells/`.
+The two names the exporter cannot have are `<CELL>.v` and `<CELL>.spice`:
+those are the design. Its own model is published as `<CELL>.layout.v`, and
+its copy of the netlist is not published at all, because the source is the
+view.
 
 ## Building one
 
 ```bash
 docker start iic-osic-tools_shell_uid_1000
 scripts/pdk_cell.py AION_mux2i_1                 # all three stages
-scripts/pdk_cell.py AION_mux2i_1 --from layout   # resume after drawing
+scripts/pdk_cell.py AION_mux2i_1 --from layout   # resume at the layout stage
+scripts/pdk_cell.py AION_mux2i_1 --draw manual   # scaffold the generator, stop
 scripts/pdk_cell.py AION_mux2i_1 --dry-run       # print commands, run none
 ```
 
 | stage | what it proves |
 |---|---|
 | `characterize` | ngspice runs **gold, reference and custom** over every input vector and they agree. Gold is the truth table read out of the PDK Liberty, reference is the PDK cell's own transistors, custom is `<CELL>.spice`. A 2-way pass would only say the PDK agrees with itself. |
-| `layout` | the GDS built from the cell generator is Magic- and KLayout-DRC clean and LVS-clean against that same SPICE. No model is invoked — the generator is a source file in this repository. |
+| `layout` | the GDS built from the cell generator is Magic- and KLayout-DRC clean and LVS-clean against that same SPICE. The generator is the one authored artifact here; `--draw auto` has an agent write it, but the verdict is always the host-side `RESULT:` line. |
 | `post-layout` | Magic PEX, the abutted PDK baseline, Liberty characterized from the *extracted* netlist, the area/delay comparison and the view export. Every number is measured from the drawn cell. |
 
-The layout stage never calls an agent. If the generator does not exist it
-scaffolds one and stops; you finish it by hand and re-run. That is the same
-contract as the main flow's `DRAW_MODE=manual`.
+The cell is designed by hand; its *drawing* need not be. The layout stage
+takes the same two contracts step 6 of the main flow does:
+
+* `--draw auto` (default) scaffolds `aion_layout_claude/cells/<CELL>.py` if it
+  is missing, then loops verify → evidence → `claude -p` until the layout
+  verifies or `--max-iters` turns are spent. The agent may write only that one
+  file; DRC and LVS run here, on the host, and a turn that leaves the generator
+  untouched twice in a row stops the loop — that is an agent that is not
+  running, not a layout that is hard.
+* `--draw manual` scaffolds it and stops; you finish it by hand and re-run.
+
+Never let the agent touch `<CELL>.spice`: the netlist is the hand design, it
+has already been proven against the PDK reference, and it is what LVS grades
+the drawing against.
 
 ## Getting the mapper to use it
 
@@ -63,7 +86,8 @@ It splices each extension cell's `cell (...) { ... }` block inside the base
 library's closing brace, carries across any lookup-table template the base
 does not already define, refuses on a name collision, and prefers a
 characterized `.lib` over a provisional one so a stale estimate cannot
-quietly outrank a measurement.
+quietly outrank a measurement — `<CELL>/<CELL>.lib` is the measurement, and
+it only exists once `post-layout` has published it.
 
 Verified on a 32-bit 2:1 mux:
 

@@ -165,13 +165,15 @@ def main(argv=None) -> int:
 
     cells = args.cell
     if not cells and not args.lib:
+        # "views" was where pdk_cell.py published before the views moved in
+        # beside the sources; a leftover one is not a cell.
         cells = sorted(p.name for p in DEFAULT_EXT_ROOT.glob("*")
                        if p.is_dir() and p.name != "views")
     for cell in cells:
         # The characterized Liberty step 3 of pdk_cell.py writes wins; the
         # provisional one is only used when asked for, so a stale estimate
         # can never quietly outrank a measurement.
-        measured = DEFAULT_EXT_ROOT / "views" / cell / f"{cell}.lib"
+        measured = DEFAULT_EXT_ROOT / cell / f"{cell}.lib"
         provisional = DEFAULT_EXT_ROOT / cell / f"{cell}.provisional.lib"
         if measured.exists():
             sources.append((str(measured), measured.read_text()))

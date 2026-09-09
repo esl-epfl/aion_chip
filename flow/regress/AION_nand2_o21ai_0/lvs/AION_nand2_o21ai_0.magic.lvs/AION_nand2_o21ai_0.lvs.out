@@ -1,0 +1,57 @@
+
+Circuit 1 cell sg13_lv_nmos and Circuit 2 cell sg13_lv_nmos are black boxes.
+Warning: Equate pins:  cell sg13_lv_nmos is a placeholder, treated as a black box.
+Warning: Equate pins:  cell sg13_lv_nmos is a placeholder, treated as a black box.
+
+Subcircuit pins:
+Circuit 1: sg13_lv_nmos                    |Circuit 2: sg13_lv_nmos                    
+-------------------------------------------|-------------------------------------------
+1                                          |1                                          
+2                                          |2                                          
+3                                          |3                                          
+4                                          |4                                          
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes sg13_lv_nmos and sg13_lv_nmos are equivalent.
+
+Circuit 1 cell sg13_lv_pmos and Circuit 2 cell sg13_lv_pmos are black boxes.
+Warning: Equate pins:  cell sg13_lv_pmos is a placeholder, treated as a black box.
+Warning: Equate pins:  cell sg13_lv_pmos is a placeholder, treated as a black box.
+
+Subcircuit pins:
+Circuit 1: sg13_lv_pmos                    |Circuit 2: sg13_lv_pmos                    
+-------------------------------------------|-------------------------------------------
+1                                          |1                                          
+2                                          |2                                          
+3                                          |3                                          
+4                                          |4                                          
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes sg13_lv_pmos and sg13_lv_pmos are equivalent.
+
+Subcircuit summary:
+Circuit 1: AION_nand2_o21ai_0              |Circuit 2: AION_nand2_o21ai_0              
+-------------------------------------------|-------------------------------------------
+sg13_lv_nmos (5)                           |sg13_lv_nmos (5)                           
+sg13_lv_pmos (5)                           |sg13_lv_pmos (5)                           
+Number of devices: 10                      |Number of devices: 10                      
+Number of nets: 11                         |Number of nets: 11                         
+---------------------------------------------------------------------------------------
+Netlists match uniquely.
+
+Subcircuit pins:
+Circuit 1: AION_nand2_o21ai_0              |Circuit 2: AION_nand2_o21ai_0              
+-------------------------------------------|-------------------------------------------
+VDD                                        |VDD                                        
+VSS                                        |VSS                                        
+I1                                         |I1                                         
+I0                                         |I0                                         
+I2                                         |I2                                         
+I3                                         |I3                                         
+O0                                         |O0                                         
+---------------------------------------------------------------------------------------
+Cell pin lists are equivalent.
+Device classes AION_nand2_o21ai_0 and AION_nand2_o21ai_0 are equivalent.
+
+Final result: Circuits match uniquely.
+.

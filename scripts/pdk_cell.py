@@ -26,14 +26,30 @@
 #                   that the hand-designed netlist computes the function.
 #    layout         build the GDS from the cell generator, then Magic and
 #                   KLayout DRC and Magic + Netgen LVS against that same
-#                   SPICE.  No model is invoked: the generator is a source
-#                   file in this repository, written by hand.  If it is
-#                   missing the stage scaffolds one and stops.
+#                   SPICE.  The generator -- aion_layout_claude/cells/<CELL>.py
+#                   -- is the one artifact of this script that is authored
+#                   rather than computed, so, exactly like step 6 of the main
+#                   flow, this stage either waits for a human to write it or
+#                   drives an agent until it verifies:
+#
+#                     --draw auto (default)  scaffold it if it does not exist,
+#                                            then loop verify -> evidence ->
+#                                            `claude -p` until RESULT: PASS or
+#                                            --max-iters turns are spent.
+#                     --draw manual          scaffold it, print the loop, stop.
+#
+#                   The agent only ever writes the generator.  Every graded
+#                   step runs here, on the host, and what the agent says it
+#                   did is never the verdict -- the verdict is the RESULT:
+#                   line `aion-layout-verify` prints.
 #    post-layout    Magic PEX, the abutted PDK-cell baseline, Liberty
 #                   characterization from the extracted netlist, the
 #                   area/delay comparison against that baseline, and the
 #                   view export.  Every number here is measured from the
-#                   drawn cell, not projected from a device count.
+#                   drawn cell, not projected from a device count.  The views
+#                   land in implementation/pdk_extension/<CELL>/, beside the
+#                   sources they were drawn from -- one directory per cell,
+#                   exactly as step 6 publishes the mined ones.
 #
 #  Nothing is published until the layout verifies, and the verdict is this
 #  script's own `verify`, never a claim made anywhere else.
@@ -42,7 +58,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -51,18 +69,47 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
+#: One `claude -p` turn, narrated while it runs.  Shared with step 6 of the
+#: main flow rather than reimplemented: the streaming, the teed log, the
+#: watchdog and the "what did it actually say" parsing are the same problem
+#: here, and a second copy of them would be a second copy to keep honest.
+from flow import agent
+
+#: The host-side LEF sanity check `make pnr` would otherwise discover an hour
+#: into detailed routing.  Same one step 6 publishes through.
+from collect_cells import check_lef
+
 AION_FLOW = PROJECT_ROOT / "aion_flow"
 DOCKER_RUN = PROJECT_ROOT / "scripts" / "docker_run.sh"
 CELLS_ROOT = PROJECT_ROOT / "implementation" / "pdk_extension"
-VIEWS_ROOT = CELLS_ROOT / "views"
 BUILD_ROOT = PROJECT_ROOT / "flow" / "pdk_extension"
-LAYOUT_CELLS = AION_FLOW / "tools" / "aion_layout_claude" / "cells"
+LAYOUT_TOOL = AION_FLOW / "tools" / "aion_layout_claude"
+LAYOUT_CELLS = LAYOUT_TOOL / "cells"
 
 #: Where the container sees this project.  Same mapping scripts/flow/paths.py
 #: uses, repeated here so this script stands alone.
 CONTAINER_ROOT = "/foss/designs/aion_chip"
 
+#: ...and the name the aion_flow submodule answers to in there.  The layout
+#: tool opens the container itself and defaults its mount to
+#: /foss/designs/aion_flow, which on this machine is a DIFFERENT, standalone
+#: checkout: every path this script hands it is under aion_chip and simply
+#: does not exist there, which is why DRC and LVS "could not run".
+CONTAINER_AION_FLOW = f"{CONTAINER_ROOT}/aion_flow"
+
 STAGES = ("characterize", "layout", "post-layout")
+DRAW_MODES = ("auto", "manual")
+
+#: What `make pnr` demands of every published cell, and what it merely likes
+#: to have -- the same two lists step 6 of the main flow publishes by.
+REQUIRED_VIEWS = (".lef", ".lib", ".gds")
+RECOMMENDED_VIEWS = (".v", ".spice", ".cdl")
+
+#: Everything publishing owns inside the cell's directory.  Anything here that
+#: is not an authored source is a leftover from an earlier run and is removed
+#: before the new views land, so a view the exporter stopped writing cannot
+#: sit there looking current.
+PUBLISHED_SUFFIXES = REQUIRED_VIEWS + RECOMMENDED_VIEWS + (".png",)
 
 
 # ---------------------------------------------------------------------------
@@ -133,16 +180,60 @@ class Cell:
     @property
     def reference(self) -> Path:
         """The abutted PDK netlist aion_char assembles, used as the baseline."""
-        return (self.build / "steps" / "aion_char" / "tb" / "spice"
-                / "reference_cells.spice")
+        return (
+            self.build
+            / "steps"
+            / "aion_char"
+            / "tb"
+            / "spice"
+            / "reference_cells.spice"
+        )
 
     @property
     def reference_split(self) -> Path:
         return self.build / "raw_spice" / f"reference_{self.name}.spice"
 
     @property
-    def views(self) -> Path:
-        return VIEWS_ROOT / self.name
+    def provisional_lib(self) -> Path:
+        """The floorplan estimate the mapper uses until the cell is drawn."""
+        return self.dir / f"{self.name}.provisional.lib"
+
+    @property
+    def layout_verilog(self) -> Path:
+        """The exporter's generated model, published beside the gold one.
+
+        `aion_layout` writes a `<CELL>.v` of its own, solved from the netlist,
+        and that name is already taken here by the hand-written reference the
+        netlist was proved against.  The generated model is still worth
+        publishing -- it is what a gate-level simulation of the drawn cell
+        runs -- so it is published under a name that cannot overwrite it.
+        """
+        return self.dir / f"{self.name}.layout.v"
+
+    @property
+    def authored(self) -> set:
+        """The files that belong to the author, and are never published over."""
+        return {self.verilog.name, self.spice.name,
+                self.provisional_lib.name, self.floorplan.name}
+
+    @property
+    def floorplan(self) -> Path:
+        """The placement/routing plan, decided by hand before any drawing.
+
+        The `aion-layout` skill opens with "Floorplan first -- do not start
+        placing rectangles", and an agent handed no floorplan does that whole
+        derivation in extended thinking: the first auto run spent three
+        64k-token thinking blocks on it and never reached an edit.  A
+        PDK-extension cell is designed by hand, so its floorplan is authored
+        by hand too, and the drawer is told to implement it rather than
+        rediscover it.
+        """
+        return self.dir / "FLOORPLAN.md"
+
+    @property
+    def evidence(self) -> Path:
+        """What the last verify found, as the drawing agent's briefing."""
+        return self.build / "layout" / f"{self.name}.evidence.md"
 
     def require_sources(self) -> None:
         missing = [p for p in (self.verilog, self.spice) if not p.exists()]
@@ -151,12 +242,51 @@ class Cell:
                 f"error: {self.name} is missing "
                 + ", ".join(str(p.relative_to(PROJECT_ROOT)) for p in missing)
                 + f"\n       a PDK-extension cell is authored as {self.name}.v "
-                  f"(the gold gate-level reference)\n       plus {self.name}.spice "
-                  f"(the transistor implementation), both under\n       "
-                  f"{CELLS_ROOT.relative_to(PROJECT_ROOT)}/{self.name}/")
+                f"(the gold gate-level reference)\n       plus {self.name}.spice "
+                f"(the transistor implementation), both under\n       "
+                f"{CELLS_ROOT.relative_to(PROJECT_ROOT)}/{self.name}/"
+            )
+
+
+@dataclass
+class Draw:
+    """How the layout stage gets its generator written."""
+
+    mode: str = "auto"
+    max_iters: int = 12
+    timeout: int = 1800  # seconds per turn; one turn is DRC + LVS + edits
+    model: str | None = "claude-opus-5"
+    effort: str | None = "low"
+    stream: bool = True
+    claude: str = "claude"  # resolved on PATH before the stage starts
 
 
 # ---------------------------------------------------------------------------
+@dataclass
+class Result:
+    """What one make invocation returned, and what it said."""
+
+    returncode: int
+    output: str
+    log: Path | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+    def verdict(self, prefix: str) -> str | None:
+        """The aion_layout convention: exactly one line starts at column 0 and
+        it is the verdict (`RESULT: PASS`, `COMPARE: WIN`).  Everything else is
+        indented, so an anchored match is unambiguous -- and it has to be one,
+        because GNU make reports its own failure as exit 2 whatever the recipe
+        returned, which makes FAIL and ERROR indistinguishable from the status.
+        """
+        for line in self.output.splitlines():
+            if line.startswith(prefix):
+                return line.strip()
+        return None
+
+
 class Runner:
     """Make targets, on the host or through the container."""
 
@@ -165,40 +295,57 @@ class Runner:
         self.quiet = quiet
         self.log_dir = PROJECT_ROOT / "flow" / "logs" / "pdk_extension"
 
-    def _exec(self, argv: list, name: str, env: dict | None = None) -> int:
+    def _exec(self, argv: list, name: str, env: dict | None = None) -> Result:
         pretty = " ".join(argv)
         if self.dry_run:
             print(f"  $ {pretty}")
-            return 0
+            return Result(0, "")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log = self.log_dir / f"{name}.log"
         full = {**os.environ, **(env or {})}
+        lines = []
         with open(log, "w", encoding="utf-8") as fh:
             fh.write(f"# cwd: {AION_FLOW}\n# cmd: {pretty}\n\n")
             fh.flush()
-            proc = subprocess.Popen(argv, cwd=str(AION_FLOW), env=full,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(AION_FLOW),
+                env=full,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
             assert proc.stdout is not None
             for line in proc.stdout:
                 fh.write(line)
+                lines.append(line)
                 if not self.quiet:
                     print("    " + line.rstrip(), flush=True)
             code = proc.wait()
         if code:
-            fail(f"{name} exited {code} — see "
-                 f"{log.relative_to(PROJECT_ROOT)}")
-        return code
+            fail(f"{name} exited {code} — see {log.relative_to(PROJECT_ROOT)}")
+        return Result(code, "".join(lines), log)
 
-    def host(self, target: str, variables: list, name: str) -> int:
-        """A make target that runs on the host (the layout tool self-dockers)."""
-        return self._exec(["make", "--no-print-directory", target, *variables],
-                          name)
+    def host(self, target: str, variables: list, name: str) -> Result:
+        """A make target that runs on the host (the layout tool self-dockers).
 
-    def contained(self, target: str, variables: list, name: str) -> int:
+        AION_CONTAINER_MOUNT is not optional: the layout tool opens the
+        container per step and would otherwise run every containerised
+        half -- DRC, LVS, PEX, characterization, the LEF export -- inside the
+        standalone aion_flow checkout, where none of this cell's files exist.
+        """
+        return self._exec(
+            ["make", "--no-print-directory", target, *variables],
+            name,
+            env={"AION_CONTAINER_MOUNT": CONTAINER_AION_FLOW},
+        )
+
+    def contained(self, target: str, variables: list, name: str) -> Result:
         """A make target that only exists inside iic-osic-tools."""
-        argv = [str(DOCKER_RUN),
-                " ".join(["make", "--no-print-directory", target, *variables])]
+        argv = [
+            str(DOCKER_RUN),
+            " ".join(["make", "--no-print-directory", target, *variables]),
+        ]
         return self._exec(argv, name, env={"HOST_PWD": str(PROJECT_ROOT)})
 
 
@@ -206,7 +353,10 @@ def container_running() -> bool:
     try:
         out = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=20).stdout
+            capture_output=True,
+            text=True,
+            timeout=20,
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return False
     return "iic-osic-tools_shell_uid_1000" in out
@@ -230,10 +380,12 @@ def stage_characterize(cell: Cell, run: Runner) -> int:
         f"BUILD_DIR={container(cell.build / 'steps')}",
         f"CUSTOM={container(cell.spice)}",
     ]
-    for target, label in (("aion-char-generate", "testbench generation"),
-                          ("aion-char-sv", "SystemVerilog testbenches"),
-                          ("aion-char-spice", "ngspice testbenches")):
-        if run.contained(target, common, f"{cell.name}.{target}"):
+    for target, label in (
+        ("aion-char-generate", "testbench generation"),
+        ("aion-char-sv", "SystemVerilog testbenches"),
+        ("aion-char-spice", "ngspice testbenches"),
+    ):
+        if not run.contained(target, common, f"{cell.name}.{target}").ok:
             fail(label + " failed")
             return 1
         ok(label) if not run.dry_run else info(f"would run: {label}")
@@ -241,8 +393,7 @@ def stage_characterize(cell: Cell, run: Runner) -> int:
     if run.dry_run:
         return 0
     if not cell.reference.exists():
-        fail(f"no reference netlist at "
-             f"{cell.reference.relative_to(PROJECT_ROOT)}")
+        fail(f"no reference netlist at {cell.reference.relative_to(PROJECT_ROOT)}")
         return 1
 
     # The layout baseline wants one file per cell; aion_char writes them all
@@ -253,22 +404,28 @@ def stage_characterize(cell: Cell, run: Runner) -> int:
     marker = f".subckt reference_{cell.name} "
     start = text.find(marker)
     if start < 0:
-        fail(f"reference_{cell.name} not found in "
-             f"{cell.reference.relative_to(PROJECT_ROOT)}")
+        fail(
+            f"reference_{cell.name} not found in "
+            f"{cell.reference.relative_to(PROJECT_ROOT)}"
+        )
         return 1
     end = text.find(".ends", start)
     cell.reference_split.write_text(text[start:end] + ".ends\n")
-    ok(f"reference netlist -> "
-       f"{cell.reference_split.relative_to(PROJECT_ROOT)}")
+    ok(f"reference netlist -> {cell.reference_split.relative_to(PROJECT_ROOT)}")
     return 0
 
 
-def stage_layout(cell: Cell, run: Runner, jobs: int) -> int:
+def stage_layout(cell: Cell, run: Runner, jobs: int, draw: Draw) -> int:
     """Build the GDS from the generator, then DRC and LVS it.
 
-    No model is called.  The generator is a hand-written source file; if it
-    does not exist yet this scaffolds one and stops, which is the same
-    contract as the main flow's DRAW_MODE=manual.
+    The generator is the one authored artifact in this script, and this is
+    where it comes from.  `--draw manual` scaffolds it and stops, the way the
+    main flow's DRAW_MODE=manual does.  `--draw auto`, the default, drives the
+    same agent step 6 does until the layout verifies -- the cell is
+    hand-designed, its *drawing* need not be.
+
+    Either way the verdict is the RESULT: line of a host-side verify, never
+    the agent's own account of what it did.
     """
     head(f"layout  {cell.name}")
     common = [
@@ -276,33 +433,263 @@ def stage_layout(cell: Cell, run: Runner, jobs: int) -> int:
         f"LAYOUT_NETLIST={cell.spice}",
         f"BUILD_DIR_LAYOUT={cell.build / 'layout'}",
         f"FINAL_DIR={cell.build / 'layout' / 'final'}",
+        f"JOBS={jobs}",
     ]
     if not cell.generator.exists():
-        info(f"no generator at {cell.generator.relative_to(PROJECT_ROOT)} — "
-             f"scaffolding one")
-        if run.host("aion-layout-scaffold", common, f"{cell.name}.scaffold"):
+        info(
+            f"no generator at {cell.generator.relative_to(PROJECT_ROOT)} — "
+            f"scaffolding one"
+        )
+        if not run.host("aion-layout-scaffold", common, f"{cell.name}.scaffold").ok:
             return 1
-        warn("the scaffold is deliberately incomplete: no contacts, no "
-             "routing, no taps. Its first verify WILL fail.")
-        info(f"finish it by hand, then re-run:  "
-             f"scripts/pdk_cell.py {cell.name} --from layout")
-        return 2
+        warn(
+            "the scaffold is deliberately incomplete: no contacts, no "
+            "routing, no taps. Its first verify WILL fail."
+        )
+        if draw.mode != "auto":
+            info(
+                f"finish it by hand, then re-run:  "
+                f"scripts/pdk_cell.py {cell.name} --from layout"
+            )
+            return 2
 
     info(f"generator: {cell.generator.relative_to(PROJECT_ROOT)}")
-    code = run.host("aion-layout-verify", [*common, f"JOBS={jobs}"],
-                    f"{cell.name}.verify")
+
     if run.dry_run:
+        if draw.mode == "auto":
+            info(
+                f"would run up to {draw.max_iters} agent turn(s) against "
+                f"{cell.generator.relative_to(PROJECT_ROOT)}"
+            )
+        run.host("aion-layout-verify", common, f"{cell.name}.verify")
         # A dry run proves nothing about the layout; saying PASS here would
         # be asserting a verdict no tool reached.
         info("dry run: DRC and LVS were not executed, so there is no verdict")
         return 0
-    if code:
-        fail("the layout does not verify yet — read the DRC/LVS output above")
-        info(f"iterate on {cell.generator.relative_to(PROJECT_ROOT)}, then:  "
-             f"scripts/pdk_cell.py {cell.name} --from layout")
+
+    if draw.mode == "auto":
+        verdict = _draw_auto(cell, run, common, draw)
+    else:
+        verdict = _verify(cell, run, common).verdict("RESULT:")
+
+    if verdict != "RESULT: PASS":
+        fail(
+            f"the layout does not verify yet ({verdict or 'no verdict'}) — "
+            f"read the DRC/LVS output above"
+        )
+        info(
+            f"iterate on {cell.generator.relative_to(PROJECT_ROOT)}, then:  "
+            f"scripts/pdk_cell.py {cell.name} --from layout"
+        )
         return 2
     ok("RESULT: PASS — DRC and LVS clean against the hand-designed netlist")
     return 0
+
+
+def _verify(cell: Cell, run: Runner, common: list, turn: int | None = None) -> Result:
+    """Build + DRC + LVS.  One log per turn, so an auto run keeps its history."""
+    return run.host("aion-layout-verify", common, _log(cell, "verify", turn))
+
+
+def _evidence(cell: Cell, run: Runner, common: list, turn: int) -> str:
+    """The packet the last verify wrote: what failed, and where."""
+    run.host("aion-layout-evidence", common, _log(cell, "evidence", turn))
+    try:
+        return cell.evidence.read_text()
+    except OSError:
+        return ""
+
+
+def _log(cell: Cell, target: str, turn: int | None) -> str:
+    return (
+        f"{cell.name}.{target}" if turn is None else f"{cell.name}.{turn:02d}.{target}"
+    )
+
+
+def _fingerprint(path: Path) -> str | None:
+    """Content hash of the generator, or None when it does not exist."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _draw_auto(cell: Cell, run: Runner, common: list, draw: Draw) -> str | None:
+    """verify -> evidence -> agent turn, until it passes or turns run out.
+
+    Every graded step is run here.  The agent only ever writes the generator,
+    and the file on disk is the only thing that counts: a turn that timed out
+    after writing a complete generator has done the work, and one that exited
+    cleanly without touching the file has not.  Twice in a row untouched means
+    the agent is not running at all -- no credentials, no quota, a refusal --
+    and looping on that burns half an hour per turn to say "did not converge"
+    about something that never started.
+    """
+    verdict = None
+    idle = 0
+    for turn in range(1, draw.max_iters + 1):
+        verdict = _verify(cell, run, common, turn).verdict("RESULT:")
+        if verdict == "RESULT: PASS":
+            ok(f"verified after {turn - 1} agent turn(s)")
+            return verdict
+
+        info(f"turn {turn}/{draw.max_iters}  ({verdict or 'no verdict'})")
+        evidence = _evidence(cell, run, common, turn)
+        before = _fingerprint(cell.generator)
+        report = _agent_turn(cell, run, draw, evidence, turn)
+
+        if _fingerprint(cell.generator) == before:
+            idle += 1
+            warn(f"turn {turn} left the generator unchanged")
+            if report:
+                info(f"agent said: {report}")
+            if idle >= 2:
+                fail(
+                    "the drawing agent made no change twice in a row — it is "
+                    "not running, not that the layout is hard"
+                )
+                info(
+                    f"check {run.log_dir.relative_to(PROJECT_ROOT)}/"
+                    f"{cell.name}.agent.*.log"
+                )
+                return verdict
+        else:
+            idle = 0
+
+    # One last graded check after the final turn.
+    verdict = _verify(cell, run, common, draw.max_iters + 1).verdict("RESULT:")
+    if verdict != "RESULT: PASS":
+        warn(f"still {verdict or 'unverified'} after {draw.max_iters} turn(s)")
+    return verdict
+
+
+def _floorplan_section(cell: Cell) -> list:
+    """The hand-authored plan, verbatim, or an instruction to derive one.
+
+    Verbatim on purpose: it carries coordinates, and a summary of a coordinate
+    is a wrong coordinate.
+    """
+    try:
+        text = cell.floorplan.read_text()
+    except OSError:
+        return [
+            "There is no FLOORPLAN.md for this cell. Derive the floorplan the "
+            "skill's way -- shared diffusion, columns, width, then draw -- and "
+            "write it into the generator's module docstring so the next turn "
+            "does not derive it again.",
+            "",
+        ]
+    return [
+        f"=== THE FLOORPLAN — {cell.floorplan}, authored by hand ===",
+        "The STRUCTURE in it -- device pairing, diffusion segments, node and "
+        "gate coordinates, cell width, taps, pins -- is a DECISION. Implement "
+        "it; do not re-derive it and do not silently depart from it. If you "
+        "believe one of those numbers is wrong, say so in your final message "
+        "and stop: changing it is the author's call, not yours.",
+        "The ROUTING is deliberately NOT decided, and the document says which "
+        "section is which. Do not try to settle it analytically before you "
+        "draw -- that is a trap this cell has already cost two agent turns. "
+        "Draw the structure, run verify, and let the evidence packet's "
+        "cross-net overlap table drive the routing. A broken GDS on disk beats "
+        "a plan that is not on disk.",
+        "",
+        text[:40000],
+        "",
+    ]
+
+
+def _agent_turn(cell: Cell, run: Runner, draw: Draw, evidence: str, turn: int) -> str:
+    """One `claude -p`, narrated while it runs.  Grades nothing."""
+
+    def cmd(target: str) -> str:
+        return (
+            f"make -C {LAYOUT_TOOL} {target} CELL={cell.name} "
+            f"NETLIST={cell.spice} BUILD_DIR={cell.build / 'layout'}"
+        )
+
+    prompt = "\n".join(
+        [
+            f"Use the aion-layout skill. Draw the standard-cell layout for "
+            f"{cell.name}.",
+            "",
+            "The ONLY file you may create or edit is:",
+            f"    {cell.generator}",
+            "",
+            f"Its target netlist is {cell.spice}.",
+            "That netlist is a HAND-DESIGNED PDK-extension cell: it is the source "
+            "of truth for both the connectivity and the device widths that LVS "
+            "grades against, it has already been proven in SPICE against the PDK "
+            "reference, and you must NEVER modify it.",
+            "Never hand-edit a GDS, a report, or anything under the build "
+            "directory — they are evidence.",
+            "",
+            "Check your work, and read what to fix, with:",
+            f"    {cmd('verify')}",
+            f"    {cmd('evidence')}",
+            "Run them EARLY and often. They take about three minutes and they "
+            "answer questions about geometry that reasoning answers slowly and "
+            "worse. Write an incomplete generator and verify it rather than "
+            "thinking a complete one through: your first verify should happen "
+            "before the cell is finished, not after.",
+            "Work until `verify` prints `RESULT: PASS` at the start of a line.",
+            "Exactly one line of that output starts at column 0 and it is the "
+            "verdict; everything else is indented. Do not read make's exit status "
+            "as the verdict — make reports its own failure as 2 whatever the tool "
+            "returned.",
+            "",
+            f"This is turn {turn} of {draw.max_iters}. Stop as soon as the "
+            "generator is written and verifying; do not report success you have "
+            "not seen a RESULT: PASS for.",
+            "",
+            *_floorplan_section(cell),
+            "=== evidence from the last verify ===",
+            evidence[:60000] if evidence else "(no evidence packet yet)",
+        ]
+    )
+
+    argv = [
+        draw.claude,
+        "-p",
+        prompt,
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        "Read,Edit,Write,Glob,Grep,Bash(make:*),Bash(python3:*),Bash(sed:*),Bash(cat:*)",
+        "--add-dir",
+        str(cell.build / "layout"),
+    ]
+    if draw.model:
+        argv += ["--model", draw.model]
+    if draw.effort:
+        argv += ["--effort", draw.effort]
+
+    env = dict(os.environ)
+    # Without this the agent's own `make verify` would drive the container
+    # against the other aion_flow checkout, and every DRC and LVS it ran
+    # would come back "could not run".
+    env["AION_CONTAINER_MOUNT"] = CONTAINER_AION_FLOW
+
+    log = run.log_dir / f"{cell.name}.agent.{turn}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    info(_c(f"▶ claude -p  (turn {turn}/{draw.max_iters}, {cell.name})", "37"))
+    info(f"live log {log.relative_to(PROJECT_ROOT)}")
+
+    result = agent.run(
+        argv,
+        cwd=AION_FLOW,
+        env=env,
+        log=log,
+        timeout=draw.timeout,
+        stream=draw.stream,
+        echo=not run.quiet,
+    )
+    info(
+        f"agent exit {result.returncode} in {result.duration_s:.0f}s   "
+        f"log {log.relative_to(PROJECT_ROOT)}"
+    )
+    return result.report or (
+        f"exit {result.returncode}, no output" if not result.ok else ""
+    )
 
 
 def stage_post_layout(cell: Cell, run: Runner, corners: str, jobs: int) -> int:
@@ -315,99 +702,341 @@ def stage_post_layout(cell: Cell, run: Runner, corners: str, jobs: int) -> int:
     """
     head(f"post-layout characterization  {cell.name}")
     if not cell.reference_split.exists() and not run.dry_run:
-        fail(f"no baseline at {cell.reference_split.relative_to(PROJECT_ROOT)}"
-             f" — run the characterize stage first")
+        fail(
+            f"no baseline at {cell.reference_split.relative_to(PROJECT_ROOT)}"
+            f" — run the characterize stage first"
+        )
         return 1
-    code = run.host("aion-layout-flow", [
-        f"CELL={cell.name}",
-        f"LAYOUT_NETLIST={cell.spice}",
-        f"BUILD_DIR_LAYOUT={cell.build / 'layout'}",
-        f"FINAL_DIR={cell.views}",
-        f"BASELINE={cell.reference_split}",
-        f"CORNERS={corners}",
-        f"JOBS={jobs}",
-    ], f"{cell.name}.flow")
+    result = run.host(
+        "aion-layout-flow",
+        [
+            f"CELL={cell.name}",
+            f"LAYOUT_NETLIST={cell.spice}",
+            f"BUILD_DIR_LAYOUT={cell.build / 'layout'}",
+            f"FINAL_DIR={cell.build / 'layout' / 'final'}",
+            f"BASELINE={cell.reference_split}",
+            f"CORNERS={corners}",
+            f"JOBS={jobs}",
+        ],
+        f"{cell.name}.flow",
+    )
     if run.dry_run:
         info("dry run: nothing was extracted, characterized or published")
         return 0
-    if code:
+    if not result.ok:
         fail("the mechanical chain failed")
         return 1
-    ok(f"views published to {cell.views.relative_to(PROJECT_ROOT)}")
+    verdict = result.verdict("RESULT:")
+    if verdict and verdict != "RESULT: PASS":
+        fail(f"the mechanical chain re-graded the cell {verdict}")
+        return 1
+    if not _publish_views(cell):
+        return 1
     _report_views(cell)
     return 0
 
 
+def _publish_views(cell: Cell) -> bool:
+    """Copy the exported views into `implementation/pdk_extension/<CELL>/`.
+
+    The same shape step 6 of the main flow publishes in -- one directory per
+    cell, every view beside every other -- except that here the directory is
+    not empty: it already holds the files the cell was *authored* from.  So
+    two of the exported views cannot be written under the names the exporter
+    gave them.
+
+      `<CELL>.v`      is a model `aion_layout` generates from the netlist, and
+                      `<CELL>.v` here is the hand-written gold reference that
+                      netlist was proved against.  Published as
+                      `<CELL>.layout.v`.
+      `<CELL>.spice`  is the exporter's copy of the hand design itself.  It is
+                      the same file that went in, so it is not published at
+                      all; if it ever differs it is published beside the
+                      original, under `.layout.spice`, and said out loud --
+                      the netlist is the design and LVS grades the drawing
+                      against it.
+
+    `aion_layout flow` writes the views to its own `BUILD_DIR/final` and does
+    not take a destination, which is why they are copied out here.  It matters
+    because `merge_lib.py` reads the *measured* Liberty from
+    `<CELL>/<CELL>.lib`, and until it is there the mapper keeps choosing this
+    cell on the provisional area estimate.
+
+    A `.rejected` file is the exporter refusing to publish, which is a finding
+    about the cell; nothing is copied on top of a refusal.
+    """
+    final = cell.build / "layout" / "final"
+    if not final.is_dir():
+        fail(f"nothing exported to {final.relative_to(PROJECT_ROOT)}")
+        return False
+    rejected = sorted(final.glob("*.rejected"))
+    if rejected:
+        fail("the exporter REFUSED to publish — "
+             + ", ".join(p.name for p in rejected))
+        info("that is a real finding about the cell, not something to work "
+             "around")
+        return False
+
+    written = [p for p in sorted(final.iterdir()) if p.is_file()]
+    views = {p.suffix.lower(): p for p in written}
+    missing = [ext for ext in REQUIRED_VIEWS if ext not in views]
+    if missing:
+        fail(f"cannot publish, missing {', '.join(missing)}")
+        return False
+
+    libs = [p for p in written if p.suffix.lower() == ".lib"]
+    if len(libs) > 1:
+        fail(f"{len(libs)} Liberty files exported. `merge_lib.py` and "
+             "`make pnr` both look for exactly <CELL>.lib, so per-corner "
+             "libs cannot be published. Re-run with --corners typ.")
+        return False
+
+    # The exporter grades the abstract too, and a cell that fails there
+    # arrives as a .rejected above.  This re-grades it on the host, because
+    # publishing is the last moment a bad abstract is cheap: past here it
+    # survives placement and kills detailed routing an hour into PnR.
+    problems = check_lef(str(views[".lef"]))
+    if problems:
+        fail("cannot publish, the LEF would fail PnR")
+        for problem in problems:
+            info(f"  {problem}")
+        return False
+
+    cell.dir.mkdir(parents=True, exist_ok=True)
+    _clear_published(cell)
+
+    copied = []
+    for path in written:
+        target = _published_name(cell, path)
+        if target is None:
+            continue
+        shutil.copy2(path, cell.dir / target)
+        copied.append(target)
+
+    png = _render_png(cell, views[".gds"])
+    if png is not None:
+        copied.append(png.name)
+
+    ok(f"published {len(copied)} view(s) to "
+       f"{cell.dir.relative_to(PROJECT_ROOT)}")
+    info("  " + "  ".join(copied))
+    return True
+
+
+def _published_name(cell: Cell, path: Path) -> str | None:
+    """What an exported view is called once it sits next to the sources.
+
+    None means "do not publish this one": either it is not a view `make pnr`
+    or `merge_lib.py` has any use for, or it is the exporter handing back a
+    file the author owns.
+    """
+    suffix = path.suffix.lower()
+    if suffix not in REQUIRED_VIEWS + RECOMMENDED_VIEWS:
+        return None
+    if suffix == ".v":
+        return cell.layout_verilog.name
+    if suffix == ".spice":
+        if path.read_bytes() == cell.spice.read_bytes():
+            # The exporter's copy of the hand design.  Publishing it would
+            # write the file over itself; the source IS the view.
+            return None
+        warn(f"the exported {path.name} is not the netlist that went in — "
+             f"publishing it as {cell.name}.layout.spice, leaving the hand "
+             f"design alone")
+        return f"{cell.name}.layout.spice"
+    return path.name
+
+
+def _clear_published(cell: Cell) -> None:
+    """Remove what an earlier publish left, and nothing the author wrote."""
+    for path in sorted(cell.dir.iterdir()):
+        if not path.is_file() or path.name in cell.authored:
+            continue
+        if path.suffix.lower() in PUBLISHED_SUFFIXES:
+            path.unlink()
+
+
+def _render_png(cell: Cell, gds: Path) -> Path | None:
+    """Draw the published cell to a PNG beside its views.
+
+    Documentation, not a view -- and never allowed to fail a publish: the
+    views are the deliverable and the picture is not, so a host without
+    klayout or Pillow publishes the cell and says why there is no image.
+    """
+    try:
+        from gds_to_image import render_gds
+    except ImportError as exc:
+        warn(f"no layout PNG, {exc}")
+        return None
+
+    png = cell.dir / f"{cell.name}.png"
+    try:
+        render_gds(str(gds), str(png), title=cell.name)
+    except Exception as exc:            # noqa: BLE001 - see the docstring
+        warn(f"could not render {png.name} — {exc}")
+        return None
+    return png
+
+
 def _report_views(cell: Cell) -> None:
     """What was published, and whether `make synth`/`make pnr` can use it."""
-    required = (".lef", ".lib", ".gds")
-    present = {p.suffix for p in cell.views.glob("*")} if cell.views.exists() else set()
-    for suffix in required:
+    present = {p.suffix.lower() for p in cell.dir.glob("*") if p.is_file()}
+    for suffix in REQUIRED_VIEWS:
         (ok if suffix in present else fail)(f"{cell.name}{suffix}")
     compare = cell.build / "layout" / f"{cell.name}.compare.md"
     if compare.exists():
         for line in compare.read_text().splitlines():
             if line.startswith("COMPARE:") or "row sites" in line:
                 info(line.strip())
+    info(f"re-run scripts/merge_lib.py so the mapper sees the measured "
+         f"{cell.name}.lib instead of the provisional estimate")
 
 
 # ---------------------------------------------------------------------------
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Characterize, draw and re-characterize one hand-designed "
-                    "PDK-extension cell.",
+        "PDK-extension cell.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="stages: " + " -> ".join(STAGES) + "\n\n"
-               "examples:\n"
-               "  scripts/pdk_cell.py AION_mux2i_1\n"
-               "  scripts/pdk_cell.py AION_mux2i_1 --from layout\n"
-               "  scripts/pdk_cell.py AION_mux2i_1 --only characterize\n")
+        "examples:\n"
+        "  scripts/pdk_cell.py AION_mux2i_1\n"
+        "  scripts/pdk_cell.py AION_mux2i_1 --from layout\n"
+        "  scripts/pdk_cell.py AION_mux2i_1 --only characterize\n"
+        "  scripts/pdk_cell.py AION_mux2i_1 --from layout --draw manual\n",
+    )
     parser.add_argument("cell", help="cell name, e.g. AION_mux2i_1")
-    parser.add_argument("--from", dest="start", choices=STAGES,
-                        default="characterize", help="first stage to run")
-    parser.add_argument("--only", choices=STAGES,
-                        help="run exactly one stage")
-    parser.add_argument("--corners", default="typ",
-                        help="Liberty corners to characterize (default: typ; "
-                             "'all' publishes one .lib per corner, which "
-                             "`make pnr` cannot group)")
-    parser.add_argument("--jobs", type=int, default=8,
-                        help="parallel ngspice jobs (default: 8)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="print every command, run nothing")
-    parser.add_argument("--quiet", action="store_true",
-                        help="do not echo tool output; it still goes to "
-                             "flow/logs/pdk_extension/")
+    parser.add_argument(
+        "--from",
+        dest="start",
+        choices=STAGES,
+        default="characterize",
+        help="first stage to run",
+    )
+    parser.add_argument("--only", choices=STAGES, help="run exactly one stage")
+    parser.add_argument(
+        "--draw",
+        choices=DRAW_MODES,
+        default="auto",
+        help="how the layout generator gets written: auto "
+        "drives `claude -p` until the layout verifies "
+        "(default), manual scaffolds it and stops",
+    )
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=12,
+        help="agent turns before giving up (default: 12)",
+    )
+    parser.add_argument(
+        "--draw-timeout",
+        type=int,
+        default=3600,
+        help="seconds per agent turn (default: 3600)",
+    )
+    parser.add_argument(
+        "--model",
+        default="claude-opus-5",
+        help="model that draws (default: claude-opus-5)",
+    )
+    parser.add_argument(
+        "--effort",
+        default="low",
+        choices=("low", "medium", "high", "xhigh", "max", "none"),
+        help="how hard it thinks per turn (default: low)",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="do not narrate the agent turn while it runs; it still goes to the log",
+    )
+    parser.add_argument(
+        "--corners",
+        default="typ",
+        help="Liberty corners to characterize (default: typ; "
+        "'all' publishes one .lib per corner, which "
+        "`make pnr` cannot group)",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=8, help="parallel ngspice jobs (default: 8)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print every command, run nothing"
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="do not echo tool output; it still goes to flow/logs/pdk_extension/",
+    )
     args = parser.parse_args(argv)
 
     cell = Cell(args.cell)
     cell.require_sources()
     run = Runner(dry_run=args.dry_run, quiet=args.quiet)
+    draw = Draw(
+        mode=args.draw,
+        max_iters=args.max_iters,
+        timeout=args.draw_timeout,
+        model=args.model or None,
+        effort=None if args.effort == "none" else args.effort,
+        stream=not args.no_stream,
+    )
 
     if not args.dry_run and not container_running():
         raise SystemExit(
             "error: the IIC-OSIC-TOOLS container is not running — every stage "
             "here needs ngspice, magic, netgen or klayout.\n"
-            "       docker start iic-osic-tools_shell_uid_1000")
+            "       docker start iic-osic-tools_shell_uid_1000"
+        )
 
-    todo = [args.only] if args.only else list(STAGES[STAGES.index(args.start):])
+    todo = [args.only] if args.only else list(STAGES[STAGES.index(args.start) :])
+
+    if "layout" in todo and draw.mode == "auto" and not args.dry_run:
+        # Resolved before anything runs: "there is no claude on PATH" should
+        # stop the script now, not after the characterize stage has spent
+        # twenty minutes in ngspice.
+        found = shutil.which(draw.claude)
+        if found is None:
+            raise SystemExit(
+                "error: --draw auto needs the `claude` CLI on PATH. Use "
+                "--draw manual and draw the generator yourself."
+            )
+        draw.claude = found
+
     print(_c(f"AION PDK extension: {cell.name}", "1"))
     info(f"reference  {cell.verilog.relative_to(PROJECT_ROOT)}")
     info(f"netlist    {cell.spice.relative_to(PROJECT_ROOT)}")
     info(f"stages     {' -> '.join(todo)}")
+    if "layout" in todo:
+        info(
+            f"draw       {draw.mode}"
+            + (
+                f"  (up to {draw.max_iters} turn(s), model {draw.model})"
+                if draw.mode == "auto"
+                else ""
+            )
+        )
 
     for stage in todo:
         if stage == "characterize":
             code = stage_characterize(cell, run)
         elif stage == "layout":
-            code = stage_layout(cell, run, args.jobs)
+            code = stage_layout(cell, run, args.jobs, draw)
         else:
             code = stage_post_layout(cell, run, args.corners, args.jobs)
         if code == 2:
             # "not drawn yet" is a stopping point, not a failure: the layout
-            # is waiting on a human, and saying FAILED would be a lie.
+            # is waiting on another turn or on a human, and saying FAILED
+            # would be a lie.  Nothing downstream may run on it either way --
+            # post-layout would characterize a cell that does not verify.
             print()
-            warn(f"stopped at {stage}: the cell is not drawn yet")
+            warn(f"stopped at {stage}: the cell does not verify yet")
+            if stage == "layout" and draw.mode == "auto":
+                info(
+                    f"the drawing agent did not converge in "
+                    f"{draw.max_iters} turn(s); re-running continues from the "
+                    f"generator as it stands"
+                )
             return 0
         if code:
             print()

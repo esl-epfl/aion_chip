@@ -1,0 +1,136 @@
+{
+  "cell": "AION_a21oi_nor2_1",
+  "baseline_cell": "reference_AION_a21oi_nor2_1",
+  "corner": "typ",
+  "operating_point": {
+    "slew_ns": 0.3294,
+    "load_pf": 0.0648
+  },
+  "verdict": "LOSS",
+  "smaller": true,
+  "faster": false,
+  "area": {
+    "name": "placement area",
+    "unit": "um2",
+    "candidate": 14.5152,
+    "baseline": 16.329600000000003,
+    "delta": -1.8144000000000027,
+    "pct": -11.111111111111125,
+    "lower_is_better": true,
+    "improved": true
+  },
+  "worst_delay": {
+    "name": "worst arc delay",
+    "unit": "ps",
+    "candidate": 547.322,
+    "baseline": 546.294,
+    "delta": 1.02800000000002,
+    "pct": 0.1881770621679938,
+    "lower_is_better": true,
+    "improved": false
+  },
+  "mean_delay": {
+    "name": "mean arc delay",
+    "unit": "ps",
+    "candidate": 458.017125,
+    "baseline": 457.632,
+    "delta": 0.38512500000001637,
+    "pct": 0.08415604677994903,
+    "lower_is_better": true,
+    "improved": false
+  },
+  "extra": [
+    {
+      "name": "cell width",
+      "unit": "um",
+      "candidate": 3.84,
+      "baseline": 4.32,
+      "delta": -0.4800000000000004,
+      "pct": -11.11111111111112,
+      "lower_is_better": true,
+      "improved": true
+    },
+    {
+      "name": "row sites",
+      "unit": "sites",
+      "candidate": 8.0,
+      "baseline": 9.000000000000002,
+      "delta": -1.0000000000000018,
+      "pct": -11.111111111111128,
+      "lower_is_better": true,
+      "improved": true
+    },
+    {
+      "name": "leakage power",
+      "unit": "pW",
+      "candidate": 146.09,
+      "baseline": 146.09,
+      "delta": 0.0,
+      "pct": 0.0,
+      "lower_is_better": true,
+      "improved": false
+    },
+    {
+      "name": "worst input capacitance",
+      "unit": "pF",
+      "candidate": 0.00301149,
+      "baseline": 0.00317998,
+      "delta": -0.00016848999999999987,
+      "pct": -5.298460996610038,
+      "lower_is_better": true,
+      "improved": true
+    }
+  ],
+  "worst_arc": {
+    "candidate": "I2->O0 rise",
+    "baseline": "I2->O0 rise"
+  },
+  "per_arc": [
+    {
+      "arc": "I0->O0 fall",
+      "candidate_ns": 0.429346,
+      "baseline_ns": 0.430024
+    },
+    {
+      "arc": "I0->O0 rise",
+      "candidate_ns": 0.522684,
+      "baseline_ns": 0.523555
+    },
+    {
+      "arc": "I1->O0 fall",
+      "candidate_ns": 0.425209,
+      "baseline_ns": 0.425805
+    },
+    {
+      "arc": "I1->O0 rise",
+      "candidate_ns": 0.531442,
+      "baseline_ns": 0.532197
+    },
+    {
+      "arc": "I2->O0 fall",
+      "candidate_ns": 0.334673,
+      "baseline_ns": 0.332891
+    },
+    {
+      "arc": "I2->O0 rise",
+      "candidate_ns": 0.547322,
+      "baseline_ns": 0.546294
+    },
+    {
+      "arc": "I3->O0 fall",
+      "candidate_ns": 0.33903,
+      "baseline_ns": 0.336962
+    },
+    {
+      "arc": "I3->O0 rise",
+      "candidate_ns": 0.534431,
+      "baseline_ns": 0.533328
+    }
+  ],
+  "notes": [
+    "corner typ: candidate AION_a21oi_nor2_1_typ_1p20V_25C (AION_a21oi_nor2_1_typ_1p20V_25C.lib) vs baseline reference_AION_a21oi_nor2_1_typ_1p20V_25C (reference_AION_a21oi_nor2_1_typ_1p20V_25C.lib)",
+    "both libraries are characterized at the same corner (voltage 1.2 V, temperature 25 C, process 1): candidate AION_a21oi_nor2_1_typ_1p20V_25C, baseline reference_AION_a21oi_nor2_1_typ_1p20V_25C",
+    "both libraries share a 7x7 characterization grid; compared at its middle point, slew 0.3294 ns / load 0.0648 pF"
+  ],
+  "verdict_line": "COMPARE: LOSS area -11.1% (14.515 vs 16.330 um2)  worst delay +0.2% (547.3 vs 546.3 ps)"
+}

@@ -33,6 +33,19 @@ flow/explore/
 # hand-designed cells. The authored .v/.spice under implementation/ are
 # tracked; everything the script derives from them is not.
 flow/pdk_extension/
+# pdk_cell.py publishes the drawn cell's views into the cell's own directory,
+# beside the sources -- so the ignore is by view, not by directory: the
+# authored .v/.spice/.provisional.lib and FLOORPLAN.md stay tracked, and
+# everything the exporter writes there does not.
+implementation/pdk_extension/*/*.lef
+implementation/pdk_extension/*/*.lib
+implementation/pdk_extension/*/*.gds
+implementation/pdk_extension/*/*.cdl
+implementation/pdk_extension/*/*.png
+implementation/pdk_extension/*/*.layout.v
+implementation/pdk_extension/*/*.layout.spice
+!implementation/pdk_extension/*/*.provisional.lib
+# the pre-move published location, so an existing tree stays clean.
 implementation/pdk_extension/views/
 
 # the pre-rename output directories, so a tree that predates the numbered
