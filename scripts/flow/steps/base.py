@@ -14,6 +14,7 @@ from typing import Optional
 from .. import paths
 from ..coherence import BLOCKED, Coherence, OK
 from ..config import Config
+from ..pdk_ext import Views
 from ..runner import Runner, StepFailed
 
 
@@ -24,6 +25,10 @@ class Context:
     coherence: Coherence
     force: bool = False
     notes: list = field(default_factory=list)
+    #: The extension views for this step, resolved on first use. See
+    #: flow/pdk_ext.py -- it is cached here because asking twice would splice
+    #: the Liberty twice and print the cells twice.
+    pdk_ext: Optional[Views] = None
 
     def note(self, message: str) -> None:
         self.notes.append(message)

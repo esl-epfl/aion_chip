@@ -1,0 +1,36 @@
+CAPI=2:
+
+# ================================================================
+#  Project:     AION
+#  Author:      Filippo Quadri <filippo.quadri@epfl.ch>
+#  Created:     2026-09-10
+#  Description: Simulation models of the hand-designed PDK-extension cells
+# ================================================================
+
+name: epfl:aion:pdk_extension:1.0.0
+description: |
+  Gate-level views of the cells under implementation/pdk_extension/.
+
+  `make synth` maps against the extended Liberty (PDK cells + these), so the
+  synthesis netlist can instantiate one and every gate-level simulation of
+  that netlist needs a model for it. `<CELL>.v` is the gold reference the
+  cell's SPICE was proved against, structural and built from PDK cells, so
+  `cells_nodelay` in aion.core supplies what it is made of and Verilator can
+  read it.
+
+  Not to be confused with epfl:aion:flow_cells:1.0.0 (flow/aion_cells.core),
+  which carries the *mined* cells flow step 6 draws. This list is hand-kept:
+  one `- <CELL>/<CELL>.v` line per cell added here.
+
+filesets:
+  models:
+    files:
+      - AION_mux2i_1/AION_mux2i_1.v
+      - AION_mux2i_2/AION_mux2i_2.v
+    file_type: verilogSource
+
+targets:
+  default: &default
+    filesets:
+      - models
+    toplevel: tt_um_aion

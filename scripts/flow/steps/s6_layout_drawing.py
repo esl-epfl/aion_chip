@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import cell_registry
 from collect_cells import check_lef
 
 from .. import agent, paths
@@ -58,6 +59,41 @@ TAG_WIDTH = 18
 #: What `make pnr` demands of every published cell.
 REQUIRED_VIEWS = (".lef", ".lib", ".gds")
 RECOMMENDED_VIEWS = (".v", ".spice", ".cdl")
+
+
+def _canonical_key(cells_v: Path, cell: str) -> Optional[str]:
+    """The canonical key of ``cell``, read off the library of record."""
+    try:
+        return cell_registry.keys_by_name(cells_v).get(cell)
+    except OSError:
+        return None
+
+
+def _registry_owner(cell: str) -> Optional[str]:
+    """The canonical key the registry says owns ``cell``'s name."""
+    for key, name in cell_registry.load().items():
+        if name == cell:
+            return key
+    return None
+
+
+def _remember(cell: str, key: str) -> None:
+    """Bind this name to this pattern, so the next run keeps the layout.
+
+    Called once the layout verifies, not once it publishes: the registry
+    records which pattern a *generator* was drawn for, and the generator is
+    what step 6 looks for when it decides whether to ask for the drawing
+    again.  A cell can verify and still never reach implementation/cells/ --
+    withheld on a LOSS, refused by the exporter, re-graded FAIL -- and none
+    of those should let a different pattern take its name while it is fixed.
+    """
+    try:
+        message = cell_registry.record(key, cell)
+    except ValueError as exc:
+        warn(f"{cell}: not recorded — {exc}")
+        return
+    if message:
+        note(f"  registry: {message}")
 
 
 def _fingerprint(path: Path) -> Optional[str]:
@@ -218,6 +254,19 @@ class LayoutDrawingStep(Step):
         emit(color(f"  ── {cell} " + "─" * max(0, 60 - len(cell)),
                    Style.CYAN, Style.BOLD))
 
+        key = _canonical_key(cells_v, cell)
+        owner = _registry_owner(cell)
+        if key is not None and owner is not None and owner != key:
+            # The generator and the published views under this name were
+            # drawn for a different pattern. Nothing downstream would notice:
+            # the scaffold check is `generator.exists()`, and a layout that
+            # implements the wrong function still passes its own DRC and LVS.
+            return CellOutcome(
+                cell, "failed",
+                detail=(f"{cell} is already the name of a different pattern "
+                        f"in {paths.rel_to_project(cell_registry.REGISTRY)}. "
+                        f"Re-run step 2 so the registry can rename it."))
+
         if not baseline.exists():
             warn(f"no PDK baseline at {paths.rel_to_project(baseline)} — the "
                  "area/delay comparison cannot run")
@@ -250,6 +299,17 @@ class LayoutDrawingStep(Step):
                                detail="layout does not verify yet")
 
         ok(f"{cell}: {verdict}")
+
+        # The earliest point at which a real drawing exists for this pattern:
+        # the generator builds, is DRC clean and LVS-matches the netlist. Bind
+        # the name here rather than after publishing, because everything
+        # between the two can withhold the views while leaving the generator
+        # on disk -- a withheld LOSS, an export the cell was refused, a
+        # re-grade to FAIL -- and it is `generator.exists()`, not the
+        # published directory, that decides whether step 6 asks for the
+        # drawing again.
+        if key is not None:
+            _remember(cell, key)
 
         # ---- everything after this point is mechanical.
         flow = run.layout("flow", [

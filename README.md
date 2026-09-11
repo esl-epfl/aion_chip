@@ -165,16 +165,28 @@ testbench asks for.
 
 ### Physical implementation
 
-| Target            | In                        | Out                     |
-| ----------------- | ------------------------- | ----------------------- |
-| `make synth`      | VHDL via FuseSoC          | `flow/1_synth/`         |
-| `make pnr`        | `NETLIST=` + `CELLS_DIR=` | `flow/7_pnr/`           |
-| `make pnr_simple` | VHDL via FuseSoC          | `flow/pnr_simple/`      |
-| `make logo`       | `logo/*.png`              | `implementation/macros/`|
+| Target             | In                          | Out                      |
+| ------------------ | --------------------------- | ------------------------ |
+| `make synth`       | VHDL via FuseSoC            | `flow/1_synth/`          |
+| `make pnr`         | `NETLIST=` + `CELLS_DIR=`   | `flow/7_pnr/`            |
+| `make pnr_simple`  | VHDL via FuseSoC            | `flow/pnr_simple/`       |
+| `make pdk_ext_lib` | `implementation/pdk_extension/` | `flow/pdk_extension/lib/` |
+| `make logo`        | `logo/*.png`                | `implementation/macros/` |
 
 `make synth` is flow step 1 and `make pnr` is flow step 7; the flow calls them
 with the right arguments, and they still work by hand. `make pnr_simple` is
 the PDK-only baseline the AI flow is measured against — it belongs to no step.
+
+`make synth` maps against the **extended** standard-cell Liberty: the PDK's
+cells plus the hand-designed ones under `implementation/pdk_extension/`,
+spliced into a single `library (…) {}` block by `scripts/merge_lib.py` and
+handed to the mapper as `CELL_LIBS`. `make pdk_ext_lib` rebuilds it and
+`make synth` runs it first, so it is never stale. `PDK_EXT=0` (or
+`./flow.py 1 --set PDK_EXT=0`) synthesizes against the plain PDK library
+instead. `make pnr_simple` never sees it — the baseline has to stay the
+baseline. `EXTRA_LIBS` would *not* do this: LibreLane reads those with
+`-setattr blackbox`, which hides the cell from the mapper. See
+[`implementation/pdk_extension/README.md`](implementation/pdk_extension/README.md).
 
 The die is a plain **660 × 210 µm** box, hardened as a macro for a parent to
 instantiate rather than as a TinyTapeout tile — and, since the move to

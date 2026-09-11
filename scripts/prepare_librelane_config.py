@@ -2,7 +2,7 @@
 #  SPDX-FileCopyrightText:    2026 Filippo Quadri
 #  SPDX-License-Identifier:   Apache-2.0 WITH SHL-2.1
 #  Created:                   2026-09-02
-#  Updated:                   2026-09-04
+#  Updated:                   2026-09-10
 #  Description:               Prepare a LibreLane configuration file
 #                             for a VHDL design.
 # ================================================================
@@ -12,7 +12,8 @@ import json
 import os
 import sys
 
-from collect_cells import collect_cells, EXTRA_KEY_BY_VIEW
+from collect_cells import (collect_cells, collect_pdk_extension_cells,
+                           EXTRA_KEY_BY_VIEW)
 
 
 # Flow that stops after synthesis for VHDL designs. Synthesis proper, its
@@ -159,6 +160,26 @@ def main():
         "(only meaningful in --mode pnr).",
     )
     parser.add_argument(
+        "--pdk-ext-dir",
+        default=None,
+        help="implementation/pdk_extension/, whose hand-designed cells are "
+        "wired in as EXTRA_* beside the mined ones. A separate flag from "
+        "--cells-dir because the two directories name their views "
+        "differently, not because the cells are treated differently (only "
+        "meaningful in --mode pnr).",
+    )
+    parser.add_argument(
+        "--cell-lib",
+        action="append",
+        default=[],
+        metavar="CORNER=LIB",
+        help="Replace the PDK's standard-cell Liberty for one timing corner. "
+        "CORNER is a CELL_LIBS corner wildcard, e.g. '*_typ_1p20V_25C'. "
+        "Repeatable, and repeating the same corner adds a second library to "
+        "it. Passing any at all replaces CELL_LIBS wholesale, so give one per "
+        "corner in STA_CORNERS.",
+    )
+    parser.add_argument(
         "--project-root",
         default=None,
         help="Directory mounted into the LibreLane container. Referenced files "
@@ -245,28 +266,98 @@ def main():
         print(f"  pin order: {config['IO_PIN_ORDER_CFG']}")
 
     # ------------------------------------------------------------------
-    # AI-generated cells
+    # Standard-cell Liberty
+    #
+    # CELL_LIBS (LibreLane <= 3.0 spelled it LIB) is the list the technology
+    # mapper reads -- librelane/steps/pyosys.py hands it to ABC -- so a cell
+    # that is to be *synthesized* has to be in the file this points at.
+    # EXTRA_LIBS, which --cells-dir fills in, is read with `-setattr blackbox`
+    # and registers a cell for STA and hierarchy while hiding it from the
+    # mapper: right for a macro, wrong for a standard cell. See
+    # implementation/pdk_extension/README.md.
+    #
+    # The variable is a whole map of corner wildcard -> libraries and
+    # LibreLane replaces it rather than merging into the PDK's, so every
+    # corner the design is timed at has to appear here. A corner left out has
+    # no Liberty at all, and OpenSTA cannot link a netlist whose cells it has
+    # never read.
+    # ------------------------------------------------------------------
+    config.pop("CELL_LIBS", None)
+    config.pop("LIB", None)
+
+    cell_libs = {}
+    for spec in args.cell_lib:
+        corner, sep, path = spec.partition("=")
+        if not sep or not corner.strip() or not path.strip():
+            print(
+                f"Error: --cell-lib expects CORNER=LIB, got {spec!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        corner, path = corner.strip(), path.strip()
+        if not os.path.isfile(path):
+            print(
+                f"Error: --cell-lib {corner}: no Liberty at {path}.\n"
+                f"       Build it with `make pdk_ext_lib`, or synthesize "
+                f"against the plain PDK library with PDK_EXT=0.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cell_libs.setdefault(corner, []).append(make_relative(path, args.ip_dir))
+
+    if cell_libs:
+        config["CELL_LIBS"] = cell_libs
+        for corner, libs in sorted(cell_libs.items()):
+            print(f"  cell libs {corner}: {', '.join(libs)}")
+
+    # ------------------------------------------------------------------
+    # Cells that are not the PDK's
+    #
+    # Two sources, one destination. The mined cells come from --cells-dir,
+    # where a cell is a set of files sharing one stem; the hand-designed ones
+    # come from --pdk-ext-dir, where the views are named exactly because that
+    # directory also holds the cell's sources. Both land in the same EXTRA_*
+    # lists, because from PnR's side there is no difference: a leaf standard
+    # cell with a LEF, a Liberty and a GDS.
+    #
+    # Their Liberty goes to EXTRA_LIBS and NOT to CELL_LIBS, which is the
+    # opposite of what `make synth` does with the same cells. Both are right.
+    # Synthesis has to offer them to ABC, and only CELL_LIBS is read by the
+    # mapper. PnR maps nothing -- the netlist is fixed, and `--from
+    # Checker.NetlistAssignStatements` skips synthesis entirely -- so all the
+    # Liberty has to do is let OpenSTA link and time the instances, which is
+    # exactly what EXTRA_LIBS is for. Putting them in both would define every
+    # extension cell twice, and replacing CELL_LIBS here would mean `make pnr`
+    # and `make pnr_simple` were timed against differently-built libraries --
+    # the substitution has to be the only variable between them, or step 9's
+    # comparison is measuring two things at once.
     # ------------------------------------------------------------------
     for extra_key in EXTRA_KEY_BY_VIEW.values():
         config.pop(extra_key, None)
 
+    sources = []
     if args.cells_dir is not None and os.path.isdir(args.cells_dir):
-        cells = collect_cells(args.cells_dir)
-        if cells:
-            views = {}
-            for cell in cells:
-                for view, path in cell.views.items():
-                    views.setdefault(EXTRA_KEY_BY_VIEW[view], []).append(
-                        make_relative(path, args.ip_dir)
-                    )
-            for key, paths in sorted(views.items()):
-                config[key] = sorted(paths)
-            print(
-                f"  cells: {len(cells)} ({', '.join(c.name for c in cells)}) "
-                f"-> {', '.join(sorted(views))}"
-            )
-        else:
-            print(f"  cells: none found under {args.cells_dir}")
+        sources.append((args.cells_dir, collect_cells(args.cells_dir)))
+    if args.pdk_ext_dir is not None and os.path.isdir(args.pdk_ext_dir):
+        sources.append((args.pdk_ext_dir,
+                        collect_pdk_extension_cells(args.pdk_ext_dir)))
+
+    views = {}
+    for label, cells in sources:
+        if not cells:
+            print(f"  cells: none found under {label}")
+            continue
+        for cell in cells:
+            for view, path in cell.views.items():
+                views.setdefault(EXTRA_KEY_BY_VIEW[view], []).append(
+                    make_relative(path, args.ip_dir)
+                )
+        print(f"  cells: {len(cells)} from {label} "
+              f"({', '.join(c.name for c in cells)})")
+    for key, paths in sorted(views.items()):
+        config[key] = sorted(paths)
+    if views:
+        print(f"  cell views -> {', '.join(sorted(views))}")
 
     # ------------------------------------------------------------------
     # Macros

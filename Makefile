@@ -43,7 +43,7 @@ endif
 
 .PHONY: all sim post_synth_sim post_synth_sim_ai post_pnr_sim post_pnr_sim_ai sim_all setup format \
         clean clean-impl clean-flow clean-all waves synth pnr pnr_simple librelane \
-        openroad klayout logo _save_run _setup_cocotb_env _require_sdf _check_sim_results \
+        openroad klayout logo pdk_ext_lib _save_run _setup_cocotb_env _require_sdf _check_sim_results \
         flow flow-status flow-list universal universal-update
 
 all: sim
@@ -213,12 +213,12 @@ clean-impl:  ## Remove the LibreLane run directories (hours of work — be sure)
 	rm -rf $(IMPL_BUILD_DIRS)
 
 clean-flow:  ## Remove every flow step's output under flow/ (keeps the .core files)
-	rm -rf $(FLOW_DIR)/[1-7]_* $(FLOW_DIR)/pnr_simple $(FLOW_DIR)/logs \
+	rm -rf $(FLOW_DIR)/[1-9]_* $(FLOW_DIR)/pnr_simple $(FLOW_DIR)/logs \
 	       $(FLOW_DIR)/coherence.json
 	@# flow/synth and flow/pnr are where `make synth` and `make pnr` wrote
 	@# before the step directories were numbered. A tree that predates that
 	@# rename still has them, and nothing else would ever remove them.
-	@rm -rf $(FLOW_DIR)/synth $(FLOW_DIR)/pnr
+	@rm -rf $(FLOW_DIR)/synth $(FLOW_DIR)/pnr $(FLOW_DIR)/pdk_extension
 
 clean-all: clean clean-impl clean-flow  ## All three of the above
 	rm -rf $(BUILD_DIR)
@@ -283,6 +283,73 @@ PNR_SIMPLE_OUT_DIR   ?= $(FLOW_DIR)/pnr_simple
 # Directory of AI-generated cell views (LEF/LIB/GDS/Verilog/SPICE), consumed by
 # `make pnr` only. Empty or absent means "PDK standard cells only".
 CELLS_DIR            ?= $(IMPL_DIR)/cells
+
+# ------------------------------------------------------------------------------
+# PDK extension cells
+#
+# The hand-designed cells under implementation/pdk_extension/ -- cells that
+# exist because the PDK's own implementation of a function is beatable, not
+# because the miner found them. Getting the technology mapper to *use* one
+# takes more than EXTRA_LIBS: LibreLane reads those with `-setattr blackbox`,
+# which registers a cell for STA and hides it from ABC. The list ABC maps
+# against is CELL_LIBS, so the cell has to be spliced into the standard-cell
+# Liberty that variable points at -- one `library (...) {}` block, PDK cells
+# plus ours. scripts/merge_lib.py does the splicing; see
+# implementation/pdk_extension/README.md for why.
+#
+#   make pdk_ext_lib            regenerate the extended Liberty
+#   make synth PDK_EXT=0        synthesize against the plain PDK library
+#   make pdk_ext_lib MERGE_LIB_ARGS=--provisional   before the cell is drawn
+#
+# `make synth` -- and so step 1 of the AION flow -- maps against it. `make
+# pnr_simple` deliberately does not: that target is the PDK-only baseline
+# every later comparison is measured against, and an extension cell in it
+# would move the baseline along with the result.
+#
+# One Liberty per STA corner, because CELL_LIBS is replaced rather than merged
+# and a corner with no Liberty is a corner OpenSTA cannot link the netlist at.
+# The cells are characterized at typ only, so the fast and slow libraries
+# carry the typ tables for them -- fine for the pre-PnR sanity STA that step 1
+# runs, not something to sign anything off against.
+PDK_EXT              ?= 1
+MERGE_LIB_ARGS       ?=
+PDK_EXT_DIR           = $(IMPL_DIR)/pdk_extension
+PDK_EXT_LIB_DIR       = $(FLOW_DIR)/pdk_extension/lib
+PDK_EXT_CORNERS       = typ_1p20V_25C fast_1p32V_m40C slow_1p08V_125C
+
+# aion_opt does not read Liberty; it reads a JSON technology dictionary, and
+# it SILENTLY DROPS every instance whose cell type is not in it (io/
+# yosys_json.py, "Skip blackboxes / macros not present in the tech
+# dictionary"). Once the mapper has used an extension cell that is no longer a
+# harmless default: flow step 3 rewrites the netlist with every one of those
+# instances gone and their outputs undriven. So the dictionary is extended
+# alongside the Liberty, and from the same file -- the merged typ library is
+# what the mapper chose from, so it is what the miner has to agree with.
+PDK_EXT_DICT_DIR      = $(FLOW_DIR)/pdk_extension/tech_dict
+PDK_EXT_DICT          = $(PDK_EXT_DICT_DIR)/sg13g2_stdcell_aion.json
+PDK_EXT_TYP_LIB       = $(PDK_EXT_LIB_DIR)/sg13g2_stdcell_aion_typ_1p20V_25C.lib
+
+# Cell directories under implementation/pdk_extension/. No cells means there
+# is nothing to splice and PDK_EXT has nothing to do.
+PDK_EXT_CELLS         = $(filter-out views,$(notdir $(patsubst %/,%,\
+                            $(wildcard $(PDK_EXT_DIR)/*/))))
+PDK_EXT_ON            = $(if $(filter-out 0,$(PDK_EXT)),$(if $(PDK_EXT_CELLS),1,))
+PDK_EXT_FLAGS         = $(if $(PDK_EXT_ON),$(foreach c,$(PDK_EXT_CORNERS),\
+                            --cell-lib '*_$(c)=$(PDK_EXT_LIB_DIR)/sg13g2_stdcell_aion_$(c).lib'),)
+
+# ... and the same cells at PnR, where the netlist already names them and
+# nothing is mapped any more. A separate flag from --cells-dir: that directory
+# groups a cell's views by file stem, and this one cannot, because it holds the
+# cell's *sources* beside them -- <CELL>.v is the structural gold reference and
+# <CELL>.provisional.lib a floorplan estimate, neither of which PnR may take.
+# See collect_cells.PDK_EXT_VIEW_SUFFIX.
+#
+# Their Liberty rides in EXTRA_LIBS here, not CELL_LIBS. Synthesis needs the
+# opposite because only CELL_LIBS reaches ABC; PnR maps nothing, so all the
+# Liberty has to do is let OpenSTA link the instances. It also keeps `make pnr`
+# and `make pnr_simple` timed against the same standard-cell library, which is
+# what makes step 9's comparison measure the substitution and nothing else.
+PDK_EXT_CELL_FLAGS    = $(if $(PDK_EXT_ON),--pdk-ext-dir $(PDK_EXT_DIR),)
 
 # The chip's logo, drawn as a macro on a top metal by `make logo`, and
 # instantiated by tt_um_aion as an unbound component so it lands in the netlist
@@ -394,14 +461,32 @@ define librelane_finish
 	exit $$status
 endef
 
+pdk_ext_lib: ## Splice the PDK-extension cells into the standard-cell Liberty + aion_opt's tech dict -> flow/pdk_extension/
+	@if [ -z "$(PDK_EXT_CELLS)" ]; then \
+		echo "No cells under $(PDK_EXT_DIR)/ — nothing to splice."; \
+	else \
+		for corner in $(PDK_EXT_CORNERS); do \
+			echo "[merge_lib] $$corner"; \
+			$(PYTHON) $(PROJECT_ROOT)/scripts/merge_lib.py \
+				--corner $$corner $(MERGE_LIB_ARGS) || exit 1; \
+		done; \
+		echo "[merge_tech_dict] aion_opt"; \
+		$(PYTHON) $(PROJECT_ROOT)/scripts/merge_tech_dict.py \
+			--lib $(PDK_EXT_TYP_LIB) --out $(PDK_EXT_DICT) || exit 1; \
+	fi
+	@$(PYTHON) $(PROJECT_ROOT)/scripts/pdk_ext_core.py
+
 synth: ## Synthesis + pre-PnR STA -> flow/1_synth/
-	$(call librelane_prepare,$(SYNTH_RUN_DIR),synth,$(LENIENT_FLAG))
+	@$(if $(PDK_EXT_ON),$(MAKE) --no-print-directory pdk_ext_lib,:)
+	$(call librelane_prepare,$(SYNTH_RUN_DIR),synth,$(PDK_EXT_FLAGS) $(LENIENT_FLAG))
 	$(call librelane_run,$(SYNTH_RUN_DIR),)
 	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(SYNTH_RUN_DIR) OUT_DIR=$(SYNTH_OUT_DIR)
 	$(call librelane_finish,$(SYNTH_RUN_DIR))
 
 pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) -> flow/7_pnr/
-	@$(PYTHON) $(PROJECT_ROOT)/scripts/collect_cells.py $(CELLS_DIR) $(LENIENT_FLAG)
+	@$(if $(PDK_EXT_ON),$(MAKE) --no-print-directory pdk_ext_lib,:)
+	@$(PYTHON) $(PROJECT_ROOT)/scripts/collect_cells.py $(CELLS_DIR) \
+		$(PDK_EXT_CELL_FLAGS) $(LENIENT_FLAG)
 	@if [ ! -f "$(NETLIST)" ]; then \
 		echo "Error: netlist not found: $(NETLIST)"; \
 		echo "       run 'make synth' first, or pass NETLIST=<path/to/netlist.v>"; \
@@ -409,7 +494,7 @@ pnr: ## PnR from a netlist plus the AI-generated cells (NETLIST=, CELLS_DIR=) ->
 	fi
 	@mkdir -p $(PNR_RUN_DIR)/nl
 	@cp -v $(NETLIST) $(PNR_RUN_DIR)/nl/$(TOPLEVEL).nl.v
-	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,$(LIBRELANE_FLOORPLAN) --cells-dir $(CELLS_DIR) $(LENIENT_FLAG))
+	$(call librelane_prepare,$(PNR_RUN_DIR),pnr,$(LIBRELANE_FLOORPLAN) --cells-dir $(CELLS_DIR) $(PDK_EXT_CELL_FLAGS) $(LENIENT_FLAG))
 	$(call librelane_run,$(PNR_RUN_DIR),--from Checker.NetlistAssignStatements -e nl=nl/$(TOPLEVEL).nl.v)
 	@$(MAKE) --no-print-directory _save_run RUN_DIR=$(PNR_RUN_DIR) OUT_DIR=$(PNR_OUT_DIR)
 	$(call librelane_finish,$(PNR_RUN_DIR))

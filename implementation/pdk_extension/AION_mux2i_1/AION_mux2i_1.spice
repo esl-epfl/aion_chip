@@ -33,9 +33,15 @@
 *  the saving against the PDK cell from 3 sites down to 1.  Polarity is
 *  cheaper to fix in the mapper than in the layout.
 *
-*  Characterize this cell with aion_char's --driver-cell rather than the
-*  default ideal ramp: a linear ramp is a zero-impedance driver, which is
-*  the most optimistic case there is for anything with a pass gate in it.
+*  Characterize this cell with a real driver rather than the default ideal
+*  ramp: a linear ramp is a zero-impedance driver, which is the most
+*  optimistic case there is for anything with a pass gate in it.
+*
+*      scripts/pdk_cell.py AION_mux2i_1 --driver-cell sg13g2_buf_2
+*
+*  The flag reaches aion_char's --driver-cell and is applied to the abutted
+*  PDK baseline too; comparing one stimulus against the other would be a
+*  rigged comparison.
 *
 *  Devices are single fingers at the library's own widths (nmos 740 nm,
 *  pmos 1120 nm) so both rows are unbroken-height diffusion strips and the

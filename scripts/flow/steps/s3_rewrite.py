@@ -7,15 +7,16 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
 
-from .. import paths
+from .. import paths, pdk_ext
 from ..config import Config, optional
 from ..style import info, note, ok, warn
 from .base import Context, Step, StepFailed
-from .s2_pattern_extraction import mining_vars
+from .s2_pattern_extraction import cell_lib_vars, mining_vars
 
 
 class RewriteStep(Step):
@@ -58,6 +59,29 @@ class RewriteStep(Step):
         path = Path(choice)
         return path if path.is_absolute() else (paths.PROJECT_ROOT / path)
 
+    def _lec_lib(self, ctx: Context) -> Optional[Path]:
+        """The Liberty kepler-formal must read, as a host path.
+
+        kepler-formal resolves every instance in both netlists against one
+        Liberty, so the file has to describe every cell the netlist actually
+        instantiates.  run_lec_sec.py defaults to the plain PDK library, and
+        with PDK_EXT on that is exactly the library synthesis did *not* map
+        against: the netlist can carry an `AION_mux2i_*` the mapper took out
+        of the extended one, and the LEC then dies at load time with
+
+            AION_mux2i_1 cannot be found in SNL while constructing instance ...
+
+        which is a missing cell definition, not a design that changed.  So
+        point it at the same extended Liberty `make synth` mapped against.
+
+        `None` keeps run_lec_sec.py's default -- right when PDK_EXT is off, or
+        when there are no extension cells to have been mapped in.
+        """
+        if ctx.cfg.LEC_LIB:
+            path = Path(ctx.cfg.LEC_LIB)
+            return path if path.is_absolute() else paths.PROJECT_ROOT / path
+        return pdk_ext.views(ctx).library
+
     # -----------------------------------------------------------------
     def run(self, ctx: Context) -> str:
         cfg, run = ctx.cfg, ctx.runner
@@ -65,6 +89,7 @@ class RewriteStep(Step):
         step2 = paths.STEP_DIRS["2_pattern_extraction"]
         selection = step2 / "work" / "selection.json"
         source = self._source_library(cfg)
+        ext = pdk_ext.views(ctx)
 
         self.require(step1, source, selection)
 
@@ -88,6 +113,23 @@ class RewriteStep(Step):
         if not kept and not self.dry_run:
             raise StepFailed(f"{paths.rel_to_project(source)} defines no modules", 2)
 
+        # A mined cell is named after the PDK cells it merges, so one built
+        # out of AION_mux2i_1 is called AION_mux2i_<id> -- one digit away from
+        # the hand-designed cell's own name. If the two ever land on the same
+        # name, aion_cells.v and pdk_extension.core both define that module
+        # and the simulator takes whichever it read first, silently.
+        clash = sorted(set(kept) & set(ext.cells))
+        if clash:
+            raise StepFailed(
+                f"{', '.join(clash)}: a mined cell has the same name as a "
+                f"hand-designed one under implementation/pdk_extension/.\n"
+                f"  Both would define the module, and the netlist would bind "
+                f"to whichever the reader saw first.\n"
+                f"  Rename the mined cell in "
+                f"{paths.rel_to_project(self.cells)} (keeping its "
+                f"'// AION canonical_key:' comment with it), or re-run "
+                f"step 2 with a different CELL_PREFIX.", 2)
+
         netlist = nl_dir / f"{cfg.TOP}.nl.v"
         flat = nl_dir / f"{cfg.TOP}.flat.nl.v"
         report_prefix = self.outdir / "report" / "rewrite_report"
@@ -97,6 +139,7 @@ class RewriteStep(Step):
                 f"INPUT={step1}",
                 f"TOP={cfg.TOP}",
                 *mining_vars(cfg),
+                *cell_lib_vars(ctx),
                 f"CELLS={self.cells}",
                 f"REWRITE_NETLIST={netlist}",
                 *(["REWRITE_FLAT=" + str(flat)] if cfg.REWRITE_FLAT else []),
@@ -119,6 +162,7 @@ class RewriteStep(Step):
         # No quotes here -- Runner.container() quotes each assignment once for
         # the shell hop into the container, and quoting it twice makes the
         # pair a single unopenable filename.
+        lib = self._lec_lib(ctx)
         mod = f"{paths.container(netlist)} {paths.container(self.cells)}"
         lec = run.container("aion-opt-lec", [
             f"REF={paths.container(step1)}",
@@ -126,14 +170,31 @@ class RewriteStep(Step):
             f"BUILD_DIR={paths.container(self.outdir / 'steps')}",
             # LEC runs in the container, so a Liberty named on the host has to
             # be renamed too; kepler-formal cannot open /home/... from there.
-            *optional("LIB", _lec_lib(cfg)),
+            *optional("LIB", paths.container(lib) if lib else None),
         ], name="aion-opt-lec")
         if not lec.ok:
             # run_lec_sec.py decides by string-matching its log, so a real
-            # mismatch and a tool crash share an exit status. Say which.
-            verdict = "MISMATCH" if "Difference was found." in lec.output else \
-                      "did not reach a verdict"
+            # mismatch, a tool crash and a netlist that never loaded all share
+            # an exit status. Say which.
+            unresolved = _unresolved_cells(lec.output)
+            if "Difference was found." in lec.output:
+                verdict = "MISMATCH"
+            elif unresolved:
+                verdict = ("compared nothing: " + ", ".join(unresolved)
+                           + " is not in the Liberty it read")
+            else:
+                verdict = "did not reach a verdict"
             warn(f"LEC {verdict} — see {paths.rel_to_project(lec.log)}")
+            if unresolved:
+                # kepler-formal resolves every instance against the Liberty
+                # before it compares anything, so a cell that is missing from
+                # it stops the run at load time. That is a library problem,
+                # not a rewrite that broke the design.
+                named = paths.rel_to_project(lib) if lib else "the tool default"
+                note(f"Liberty: {named}")
+                note("every cell the netlist instantiates has to be in it — "
+                     "point LEC_LIB at a Liberty that has them, or re-run "
+                     "step 1 with PDK_EXT=0")
             ctx.note(f"LEC {verdict}")
             run.check(lec, "logical equivalence check")
         ok("LEC passed: the rewritten netlist is logically identical")
@@ -175,14 +236,15 @@ class RewriteStep(Step):
                 "'// AION canonical_key:' comments.", 2)
 
 
-def _lec_lib(cfg: Config) -> Optional[str]:
-    """LEC_LIB as the container sees it, or None to keep the tool's default."""
-    if not cfg.LEC_LIB:
-        return None
-    path = Path(cfg.LEC_LIB)
-    if not path.is_absolute():
-        path = paths.PROJECT_ROOT / path
-    return paths.container(path)
+def _unresolved_cells(output: str) -> list:
+    """Cells kepler-formal could not find in the Liberty it was given.
+
+    It reports them as `<CELL> cannot be found in SNL while constructing
+    instance <INST>` and stops at the first one, so this is normally a single
+    name — but the message is the same whether one cell is missing or twenty.
+    """
+    return sorted({match.group(1) for match in
+                   re.finditer(r"(\S+) cannot be found in SNL", output)})
 
 
 def _module_names(path: Path) -> list:

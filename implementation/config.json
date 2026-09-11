@@ -66,7 +66,19 @@
       "enabled with LENIENT=1 on any make target."
     ],
 
-    "synth": {},
+    "synth": {
+      "//": [
+        "CELL_LIBS -- the standard-cell Liberty the technology mapper reads --",
+        "is NOT set here. `make synth` passes --cell-lib to",
+        "scripts/prepare_librelane_config.py, one per STA corner, pointing at",
+        "the extended library scripts/merge_lib.py builds from the PDK's cells",
+        "plus the hand-designed ones under implementation/pdk_extension/. It",
+        "has to be a path relative to the run directory, which only that",
+        "script knows. PDK_EXT=0 leaves the PDK library in place.",
+        "",
+        "`make pnr_simple` never gets the flag: it is the PDK-only baseline."
+      ]
+    },
 
     "pnr": {
       "//": [

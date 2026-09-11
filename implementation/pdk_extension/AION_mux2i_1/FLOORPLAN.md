@@ -249,6 +249,32 @@ the right direction, **a `y = n × 420` routing track inside it**, and **≥ 210
 across** so a Via1's 290 × 210 landing fits. A port that misses the track
 aborts detailed routing with `DRT-0073`, an hour into the flow.
 
+**And a fourth rule, which this cell broke.** `RT_MIN_LAYER` is `Metal2`: the
+router never puts a wire on Metal1, so *every* port is entered through a Via1,
+and the Metal2 pad of that via is a Metal2 shape like any other — it has to
+keep **0.21 µm (M2.b) from every other net's Metal2**, this cell's own risers
+included. A port can be wide enough, on-track, unobstructed, and still admit
+no via at all.
+
+That is what `I2` is. Its two gate pads are 280 nm across, which leaves a
+70 nm window for the via centre, and `Sb`'s Metal2 riser runs 15 nm to the
+right of pad A while `m`'s and `I1`'s run 285 nm left and 15 nm right of
+pad B. No via fits beside either. The pin is unreachable, and detailed
+routing says so as `DRT-0073 No access point for <inst>/I2`, once per
+orientation rather than once per instance — four errors for 698 placements,
+which reads like bad luck and is not.
+
+`scripts/collect_cells.py` checks this now, in about a second, and refuses to
+start PnR. All 283 signal pins of the shipped sg13g2 library pass it, and so
+do both mined AION cells.
+
+Fixing it inside 7 sites means moving Metal2, not widening Metal1: `pad A`
+cannot reach left past `m`'s gate pad (which is itself pinned by the poly
+contact at `x = 670`), so the room has to come from the riser. Moving `Sb`'s
+riser 85 nm right does clear `I2` — confirmed by a PnR run — and then takes
+`I0`'s only Metal2 window with it. The Metal2 budget in §5.2 is the real
+constraint, and §6 is the priced way out of it.
+
 | pin | dir | shape | track |
 |---|---|---|---|
 | `I2` | INPUT | column A's gate pin pad, 1450…1790 | 1680 ✔ |

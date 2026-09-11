@@ -55,7 +55,7 @@ halfway through a step.
 
 | # | Step | What it does | Typical time |
 |---|------|--------------|--------------|
-| 1 | `1_synth` | LibreLane synthesis + pre-PnR STA, then a post-synthesis simulation | ~1 min |
+| 1 | `1_synth` | LibreLane synthesis + pre-PnR STA, then a post-synthesis simulation. Maps against the PDK library **plus** the hand-designed cells under `implementation/pdk_extension/` (`PDK_EXT=0` to opt out) | ~1 min |
 | 2 | `2_pattern_extraction` | mine recurring subgraphs, emit a cell library, cut it to `ELITE_COUNT` | seconds |
 | 3 | `3_rewrite` | substitute the cells, prove equivalence (LEC), re-simulate | ~1 min |
 | 4 | `4_characterization` | exhaustive SV and SPICE testbenches per cell | seconds |
@@ -319,6 +319,63 @@ the page:
 python scripts/report_html.py flow/9_report/report.json -o /tmp/report.html
 ```
 
+## The PDK extension, and the two files it costs every later step
+
+Step 1 maps against the PDK's cells *plus* the hand-designed ones under
+`implementation/pdk_extension/`. From that point the netlist can instantiate a
+cell no stock file describes, and each tool that reads the netlist has to be
+told about it in its own format. `scripts/flow/pdk_ext.py` is the one place
+that knows, and it splices whatever is missing before the step that needs it:
+
+```
+flow/pdk_extension/lib/sg13g2_stdcell_aion_<corner>.lib   ABC, OpenSTA, the LEC
+flow/pdk_extension/tech_dict/sg13g2_stdcell_aion.json     aion_opt (steps 2, 3)
+implementation/pdk_extension/pdk_extension_cells.core     the post-PnR sim (7)
+```
+
+Neither file fails loudly when it is the stock one instead:
+
+* **kepler-formal** refuses to load a netlist holding a cell its Liberty does
+  not define — `AION_mux2i_1 cannot be found in SNL while constructing
+  instance _07163_` — which reads like a broken rewrite and is a missing
+  library.
+* **aion_opt** *drops* an instance whose cell type is not in its technology
+  dictionary (`io/yosys_json.py`, "Skip blackboxes / macros not present in the
+  tech dictionary"). Step 3 then writes the netlist back out with every one of
+  those instances gone and their outputs undriven. Nothing says so; the design
+  simply stops computing the right answer, and the LEC that should have caught
+  it is the same run that could not load the netlist in the first place.
+
+`PDK_EXT=0` leaves them all at their stock defaults, which is then correct: a
+netlist synthesized without the extension cells does not contain any.
+
+**Step 7 needs the cells themselves, not a description of them.** `make pnr`
+passes `--pdk-ext-dir` beside `--cells-dir`, and the extension cells' LEF,
+Liberty, GDS, SPICE, CDL and Verilog land in the same `EXTRA_*` lists the
+mined ones do — PnR maps nothing, so from its side the two kinds of cell are
+the same thing. Two details are not symmetric with step 1, and both are
+deliberate:
+
+* Their Liberty goes to `EXTRA_LIBS`, **not** `CELL_LIBS`. Only `CELL_LIBS`
+  reaches ABC, which is why step 1 needs it and step 7 must not: replacing it
+  here would leave `make pnr` and `make pnr_simple` timed against
+  differently-built libraries, and step 9's comparison exists to measure the
+  substitution and nothing else.
+* The Verilog model is `<CELL>.layout.v`, not `<CELL>.v`. After PnR the cell
+  is a leaf with its own SDF entries, so the structural gold view would
+  describe a hierarchy the netlist and the SDF do not have.
+
+The flag is separate from `--cells-dir` because the two directories name their
+views differently — `implementation/pdk_extension/` holds each cell's sources
+beside its published views, so a `.provisional.lib` and a `.layout.v` would
+group as phantom cells under stem matching. See
+`collect_cells.PDK_EXT_VIEW_SUFFIX`.
+
+Because steps 2 and 3 mine with the extended dictionary, a mined pattern *may*
+contain an extension cell. At the default `ELITE_COUNT` none does, but a
+larger elite cut or `REWRITE_CELLS=all` can select one, and step 4's SPICE
+reference leg has no `.subckt` for it in the PDK netlist.
+
 ## Coherence
 
 Each step records when it finished, the knobs it ran with, and a content
@@ -380,7 +437,7 @@ to manual.
 | `ELITE_METRIC` | `saved-area` | 2 | `saved-area`, `occurrences` or `saved-area-per-cell` |
 | `REWRITE_CELLS` | `elite` | 3 | `elite`, `all`, or a path to a hand-curated `.v` |
 | `REWRITE_FLAT` | `False` | 3 | also emit the flattened netlist (only needed for a sequential equivalence check) |
-| `LEC_LIB` | `None` | 3 | Liberty the LEC reads (`None` = the tool's own default). Mapped into the container for you. |
+| `LEC_LIB` | `None` | 3 | Liberty the LEC reads. `None` picks the extended one when `PDK_EXT` is on — see below — and otherwise the tool's own default. Mapped into the container for you. |
 | `MINIMIZER_MODE` | `transistor` | 5 | `transistor`, `area` (identical to it) or `balance` |
 | `MINIMIZER_WN` / `_WP` / `_L` | `0.74u` / `1.48u` / `0.13u` | 5 | device sizing for the re-implemented cell |
 | `MINIMIZER_MAX_INPUTS` | `6` | 5 | refuse cells wider than this; verification is 2^inputs vectors |
@@ -503,6 +560,12 @@ scripts/gds_to_image.py  the single-cell renderer step 6 calls
 **A step says `STALE UPSTREAM`** — an earlier step re-ran or its inputs
 changed. Either re-run the upstream steps, or pass `--force` if you know the
 change does not matter.
+
+**Step 3's LEC says a cell "cannot be found in SNL"** — kepler-formal
+resolves every instance against one Liberty before it compares anything, so a
+cell that is missing from it stops the run at load time. With `PDK_EXT` on the
+flow points it at `flow/pdk_extension/lib/`, which has the extension cells;
+`LEC_LIB` overrides that if you need a different one.
 
 **Step 3 fails with "the rewrite substituted nothing"** — the mining knobs in
 step 3 must match step 2's exactly, or the selection cache's fingerprint stops

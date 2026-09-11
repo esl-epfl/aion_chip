@@ -26,10 +26,16 @@ logs/<step>/            one file per command the handler ran   (git-ignored)
 pnr_simple/             the PDK-only baseline            (git-ignored)
                         not a step -- `make pnr_simple` builds it, and
                         step 9 is the only thing that reads it
+pdk_extension/          the extended standard-cell Liberty and the
+                        PDK-extension cells' working files (git-ignored)
+                        `lib/` is what step 1 maps against -- built by
+                        `make pdk_ext_lib` from ../implementation/pdk_extension/
 ```
 
 The inputs live in `../implementation/`: the config template, the SDC, the pin
-order, and `cells/`, where step 6 publishes the views step 7 places.
+order, `cells/`, where step 6 publishes the views step 7 places, and
+`pdk_extension/`, the hand-designed cells whose Liberty is spliced into the
+one the mapper reads in step 1.
 
 Run it with `./flow.py` (or `make flow`); see `../scripts/flow/README.md`.
 
@@ -48,10 +54,16 @@ missing file; the Makefile checks for it first and says which step to run.
 | `epfl:aion:flow_rewrite:1.0.0`    | `3_rewrite/nl/{aion_cells.v,tt_um_aion.nl.v}` | step 3 |
 | `epfl:aion:flow_pnr:1.0.0`        | `7_pnr/nl/tt_um_aion.nl.v`                  | step 7 |
 | `epfl:aion:flow_pnr_simple:1.0.0` | `pnr_simple/nl/tt_um_aion.nl.v`             | `make pnr_simple` |
+| `epfl:aion:pdk_extension:1.0.0`   | `../implementation/pdk_extension/<CELL>/<CELL>.v` | hand-written |
 
 `flow_rewrite` names two files on purpose: the netlist instantiates the AION
 modules and nothing else declares them, so a simulator handed only the netlist
 elaborates a design full of black boxes.
+
+`pdk_extension` is there for the same reason one step earlier: from step 1 on,
+the netlist can instantiate a hand-designed PDK-extension cell, and the PDK's
+own models do not declare it. It is the only core here that names tracked
+sources rather than flow output, which is why it lives beside the cells.
 
 `nl/` is the logical netlist and the one to simulate. `pnl/` next to it is the
 same netlist with the power pins connected (`VPWR`/`VGND`), which the PDK

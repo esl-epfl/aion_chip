@@ -1,0 +1,17 @@
+{
+  "//": [
+    "Canonical key -> cell name, so a mined pattern keeps the name its",
+    "hand-drawn layout is filed under.",
+    "",
+    "Written by step 6 once a cell's layout verifies (DRC + LVS), read by",
+    "step 2, which renames its freshly mined modules to match. An entry",
+    "means a generator exists for that pattern, not that the cell reached",
+    "implementation/cells/ -- a verified cell can still be withheld.",
+    "See scripts/cell_registry.py for why the name aion_opt generates",
+    "cannot be trusted across runs."
+  ],
+  "cells": {
+    "E0:Y:1:B1|I0:A|I0:B|I1:A1|I1:A2|N0:sg13g2_nand2|N1:sg13g2_o21ai|O1:Y": "AION_nand2_o21ai_0",
+    "E1:Y:0:B1|I0:A1|I0:A2|I1:A|I1:B|N0:sg13g2_a21oi|N1:sg13g2_nor2|O0:Y": "AION_a21oi_nor2_1"
+  }
+}

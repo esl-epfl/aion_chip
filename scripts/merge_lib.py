@@ -69,6 +69,22 @@ def _blocks(text: str, kind: str) -> "list[tuple[str, str]]":
     return found
 
 
+def cell_blocks(text: str) -> "list[tuple[str, str]]":
+    """Every `cell (NAME) { ... }` block in a Liberty, as (name, text).
+
+    Public because scripts/merge_tech_dict.py reads the *merged* library this
+    script writes: the technology dictionary aion_opt mines and rewrites with
+    has to describe the same cells the mapper chose from, and there is exactly
+    one file that says what those are.
+    """
+    return _blocks(text, "cell")
+
+
+def pin_blocks(text: str) -> "list[tuple[str, str]]":
+    """Every `pin (NAME) { ... }` block, brace-matched, as (name, text)."""
+    return _blocks(text, "pin")
+
+
 def _library_close(text: str) -> int:
     """Index of the `}` that closes the outer `library (...)` block."""
     open_at = text.index("{", re.search(r"\blibrary\s*\(", text).start())

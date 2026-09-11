@@ -1,0 +1,76 @@
+* ================================================================
+*  SPDX-FileCopyrightText:    2026 Filippo Quadri
+*  SPDX-License-Identifier:   Apache-2.0 WITH SHL-2.1
+*  Description:               AION_mux2i_2 -- transmission-gate 2:1 mux, X2
+*
+*  AION_mux2i_1 with the output stage doubled.  Same 8 devices, same
+*  selection network, same function:
+*
+*      O0 = !I0 when I2 = 0,   O0 = !I1 when I2 = 1
+*
+*  What "drive 2" means here, and what it costs.  The PDK's own mux2_2 is
+*  mux2_1 with exactly one device pair changed -- the output inverter goes
+*  from 740/1120 to 1480/2240, two fingers each, and the AOI22 core in front
+*  of it is left alone.  Its internal node therefore drives twice the gate
+*  it used to with the same current, and mux2_2's own Liberty carries the
+*  slower intrinsic delay that follows.  This cell makes the identical
+*  trade: XN3/XP3 are folded to sg13g2_inv_2's sizes and the two
+*  transmission gates are untouched, so node m charges the same doubled
+*  gate through the same pass network.  That is why the provisional Liberty
+*  borrows sg13g2_mux2_2's tables rather than mux2_1's -- mux2_2 is the PDK
+*  cell that makes this exact trade, so its numbers are the honest guess.
+*
+*  Upsizing the transmission gates instead would restore the internal delay,
+*  but a folded TG is two columns rather than one and there are four of
+*  them: 10 sites against 8, which spends the whole area win to fix an
+*  internal node that the load on O0 dominates anyway.  If characterization
+*  says the input->O0 arc has fallen behind mux2_1+inv_2, that is the knob,
+*  and it is a different cell, not a resize of this one.
+*
+*  Everything else is AION_mux2i_1's reasoning and is not repeated here:
+*  why a pair of transmission gates beats an AOI22 core, why the output
+*  inverter is what makes the cell modelable at all, and why a second
+*  inverter to undo the polarity is not worth its two CoreSites.  Read that
+*  file first; this one is the same design at a different drive.
+*
+*  Characterize with a real driver rather than the default ideal ramp: a
+*  linear ramp is a zero-impedance driver, which is the most optimistic case
+*  there is for anything with a pass gate in it.
+*
+*      scripts/pdk_cell.py AION_mux2i_2 --driver-cell sg13g2_buf_2
+*
+*  The flag reaches aion_char's --driver-cell and is applied to the abutted
+*  PDK baseline too; comparing one stimulus against the other would be a
+*  rigged comparison.
+*
+*  Device geometry.  The select inverter and both transmission gates are
+*  single fingers at the library's own widths (nmos 740 nm, pmos 1120 nm),
+*  so both rows are unbroken-height diffusion strips and the extracted
+*  widths match this netlist exactly.  The output pair cannot be widened
+*  that way -- 740/1120 already *are* the row heights -- so it is folded to
+*  ng=2, which is what sg13g2_inv_2 does and why its numbers are copied
+*  verbatim.  ad/as/pd/ps throughout are the PDK's own values for those
+*  widths, taken from sg13g2_inv_1 and sg13g2_inv_2; they are the library's
+*  estimates, not measurements of this drawing, and post-layout extraction
+*  replaces them.
+*
+*  Port order matches the AION convention that aion_layout's LVS reads:
+*      I0 = A0   I1 = A1   I2 = S   O0 = !X
+* ================================================================
+.subckt AION_mux2i_2 I0 I1 I2 O0 VDD VSS
+* ---- select inverter:  Sb = !I2 ---------------------------------------
+XP0 Sb I2 VDD VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XN0 Sb I2 VSS VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+* ---- TG0: conducts when I2 = 0, steers I0 onto m ----------------------
+XN1 m  Sb I0 VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP1 m  I2 I0 VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+* ---- TG1: conducts when I2 = 1, steers I1 onto m ----------------------
+XN2 m  I2 I1 VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP2 m  Sb I1 VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+* ---- restoring output stage, X2:  O0 = !m -----------------------------
+*      two fingers each, sg13g2_inv_2's devices verbatim.  O0 is the shared
+*      middle node (ad) and the rails are the two outer ones (as) -- the
+*      switching node is the one that must not be drawn twice.
+XP3 O0 m  VDD VDD sg13_lv_pmos w=2.24u   l=130.00n ng=2 m=1 ad=4.256e-13 as=7.616e-13 pd=3e-06    ps=5.84e-06
+XN3 O0 m  VSS VSS sg13_lv_nmos w=1.48u   l=130.00n ng=2 m=1 ad=2.812e-13 as=5.032e-13 pd=2.24e-06 ps=4.32e-06
+.ends

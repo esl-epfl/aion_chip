@@ -47,6 +47,14 @@ class Config:
     # verilator | icarus
     SYNTH_SIM_TOOL: str = "verilator"
 
+    # Map against the extended standard-cell Liberty -- the PDK's cells plus
+    # the hand-designed ones under implementation/pdk_extension/ -- so the
+    # technology mapper may pick one. `make synth` regenerates it first
+    # (scripts/merge_lib.py) and points CELL_LIBS at it. Set False to
+    # synthesize against the plain PDK library; the PDK-only baseline
+    # `make pnr_simple` builds is never affected either way.
+    PDK_EXT: bool = False
+
     # =====================================================================
     # 2_pattern_extraction   (aion_opt mining)
     # =====================================================================
@@ -62,15 +70,15 @@ class Config:
     #                     cell -- which is almost never what you want, since
     #                     every kept cell has to be drawn by hand in step 6)
     # ELITE_METRIC        saved-area | occurrences | saved-area-per-cell
-    MAX_SIZE: int = 5
+    MAX_SIZE: int = 2
     MIN_OCCURRENCES: int = 2
     MIN_SELECTED: int | None = None
-    AREA_FACTOR: float = 0.65
+    AREA_FACTOR: float = 0.85
     MAX_OUTPUTS: int | None = 1
-    MAX_INPUTS: int | None = 15
+    MAX_INPUTS: int | None = 5
     JOBS: int | None = None
     CELL_PREFIX: str = "AION_"
-    ELITE_COUNT: int | None = 25
+    ELITE_COUNT: int | None = 2
     ELITE_METRIC: str = "saved-area"
 
     # =====================================================================
@@ -92,7 +100,13 @@ class Config:
     # a sequential equivalence check; costs a second netlist write.
     REWRITE_FLAT: bool = False
 
-    # Liberty the LEC reads. None = run_lec_sec.py's own default
+    # Liberty the LEC reads.  kepler-formal resolves every instance against
+    # it before it compares anything, so it has to describe every cell the
+    # netlist instantiates -- including the extension cells the mapper took
+    # out of the extended library.  None picks that library automatically
+    # (flow/pdk_extension/lib/, splicing it first if it is not on disk) when
+    # PDK_EXT is on and there are cells under implementation/pdk_extension/,
+    # and otherwise leaves run_lec_sec.py's own default in charge
     # (aion_flow/tech/lib/sg13g2_stdcell_typ_1p20V_25C.lib).
     LEC_LIB: str | None = None
 

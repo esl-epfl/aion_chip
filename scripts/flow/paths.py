@@ -42,6 +42,21 @@ DOCKER_RUN = SCRIPTS_DIR / "docker_run.sh"
 LAYOUT_TOOL = AION_FLOW / "tools" / "aion_layout_claude"
 LAYOUT_CELLS = LAYOUT_TOOL / "cells"
 
+# The hand-designed cells, and the extended standard-cell Liberty `make
+# pdk_ext_lib` splices out of them.  The technology mapper reads that file
+# (CELL_LIBS), so a netlist synthesized with PDK_EXT on can instantiate a cell
+# the plain PDK Liberty has never heard of -- which is why everything that
+# links that netlist afterwards has to read this one instead.
+PDK_EXT_DIR = IMPL_DIR / "pdk_extension"
+PDK_EXT_LIB_DIR = FLOW_DIR / "pdk_extension" / "lib"
+PDK_EXT_DICT_DIR = FLOW_DIR / "pdk_extension" / "tech_dict"
+
+# The corner the extension cells are characterized at.  kepler-formal links a
+# netlist against a single Liberty and only reads the cells' functions out of
+# it, so which corner it is does not change the verdict -- but a file that is
+# not on disk does.  Keep it one of the Makefile's PDK_EXT_CORNERS.
+PDK_EXT_CORNER = "typ_1p20V_25C"
+
 # The mount this project has inside iic-osic-tools, and the name the
 # aion_flow submodule answers to there.
 CONTAINER_ROOT = "/foss/designs/aion_chip"
@@ -97,6 +112,33 @@ def host(path) -> Path:
     if not text.startswith(prefix):
         raise PathError(f"{text} is not under {CONTAINER_ROOT}")
     return PROJECT_ROOT / text[len(prefix):]
+
+
+def pdk_ext_cells() -> list:
+    """Cell names under implementation/pdk_extension/, one directory each.
+
+    The same rule as the Makefile's PDK_EXT_CELLS, and for the same reason:
+    no cells means there is nothing to splice into the Liberty, so PDK_EXT is
+    on but has changed nothing.
+    """
+    if not PDK_EXT_DIR.is_dir():
+        return []
+    return sorted(child.name for child in PDK_EXT_DIR.iterdir()
+                  if child.is_dir() and child.name != "views")
+
+
+def pdk_ext_lib(corner: str = PDK_EXT_CORNER) -> Path:
+    """The extended Liberty for one corner. `make pdk_ext_lib` writes it."""
+    return PDK_EXT_LIB_DIR / f"sg13g2_stdcell_aion_{corner}.lib"
+
+
+def pdk_ext_dict() -> Path:
+    """The extended technology dictionary aion_opt reads.
+
+    One file, not one per corner: aion_opt takes area and Boolean function
+    out of it and has no timing in it to vary.
+    """
+    return PDK_EXT_DICT_DIR / "sg13g2_stdcell_aion.json"
 
 
 def rel_to_project(path) -> str:

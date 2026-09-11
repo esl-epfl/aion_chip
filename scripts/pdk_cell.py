@@ -51,6 +51,15 @@
 #                   sources they were drawn from -- one directory per cell,
 #                   exactly as step 6 publishes the mined ones.
 #
+#                   --driver-cell decides what those numbers mean.  The
+#                   default stimulus is an ideal linear ramp, i.e. a
+#                   zero-impedance driver, which is a fair idealisation for a
+#                   cell whose inputs are transistor gates and is not one for
+#                   any cell here: a transmission gate's input is a
+#                   source/drain, so the driver stays in series with the
+#                   channel for the whole transition.  Pass a real cell and
+#                   both sides of the comparison are measured against it.
+#
 #  Nothing is published until the layout verifies, and the verdict is this
 #  script's own `verify`, never a claim made anywhere else.
 # ================================================================
@@ -73,11 +82,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 #: main flow rather than reimplemented: the streaming, the teed log, the
 #: watchdog and the "what did it actually say" parsing are the same problem
 #: here, and a second copy of them would be a second copy to keep honest.
-from flow import agent
-
 #: The host-side LEF sanity check `make pnr` would otherwise discover an hour
 #: into detailed routing.  Same one step 6 publishes through.
 from collect_cells import check_lef
+
+from flow import agent
 
 AION_FLOW = PROJECT_ROOT / "aion_flow"
 DOCKER_RUN = PROJECT_ROOT / "scripts" / "docker_run.sh"
@@ -99,6 +108,35 @@ CONTAINER_AION_FLOW = f"{CONTAINER_ROOT}/aion_flow"
 
 STAGES = ("characterize", "layout", "post-layout")
 DRAW_MODES = ("auto", "manual")
+
+#: Parasitic extraction mode for every cell in this directory: 2, C-coupled.
+#:
+#: `aion_layout`'s own default is 3, full RC, and it is right there -- wire
+#: resistance inside a hand-drawn cell is exactly what a small layout gets
+#: wrong.  A PDK-extension cell is graded differently, and two things follow.
+#:
+#: Mode 3 runs Magic's `extresist`, which splits a resistive net into renamed
+#: segments and can leave the `.subckt` port bound to none of them: a floating
+#: rail that LVS cannot see, because LVS extracts without resistance.  Every
+#: cell here is measured against an *abutted PDK baseline*, and an abutted row
+#: of shipped cells is precisely the geometry that trips it -- `AION_mux2i_1`'s
+#: 13-site baseline gets the binding and `AION_mux2i_2`'s 14-site one does not,
+#: from the same rail network.  `run_pex` refuses such a netlist, so on mode 3
+#: whether a cell can be characterized at all depends on how Magic happened to
+#: cut a rail.
+#:
+#: And rail resistance is the parasitic these cells least want modelled.  The
+#: characterization deck ties the rail port to ideal ground; in silicon the rail
+#: is strapped by the power grid along its whole length and abuts its neighbours
+#: on both sides.  Feeding ground in at one label point through hundreds of ohms
+#: of rail is less physical than no rail resistance at all, which is why vendor
+#: libraries characterize with ideal rails.
+#:
+#: What mode 2 gives up is signal-net wire resistance, which is real.  Pass
+#: `--pex-mode 3` to get it back on a cell whose baseline extracts cleanly --
+#: but do it for the whole library or not at all: two cells extracted at
+#: different modes are not comparable, and they land in one merged Liberty.
+PEX_MODE_DEFAULT = 2
 
 #: What `make pnr` demands of every published cell, and what it merely likes
 #: to have -- the same two lists step 6 of the main flow publishes by.
@@ -213,8 +251,12 @@ class Cell:
     @property
     def authored(self) -> set:
         """The files that belong to the author, and are never published over."""
-        return {self.verilog.name, self.spice.name,
-                self.provisional_lib.name, self.floorplan.name}
+        return {
+            self.verilog.name,
+            self.spice.name,
+            self.provisional_lib.name,
+            self.floorplan.name,
+        }
 
     @property
     def floorplan(self) -> Path:
@@ -248,6 +290,49 @@ class Cell:
             )
 
 
+@dataclass(frozen=True)
+class Driver:
+    """The cell that drives the pin under test during characterization.
+
+    aion_char's default stimulus is an ideal linear ramp, which is a
+    zero-impedance driver.  For a static CMOS cell that is a fair idealisation:
+    the input is a transistor gate, the capacitance isolates, and the driver's
+    job ends with the waveform it produced.  For every cell in
+    `implementation/pdk_extension/` it is not -- their inputs reach a pass
+    gate's source/drain, so the driver stays in series with the channel for the
+    whole transition, and a ramp is the most optimistic driver there is.  Each
+    of those cells' SPICE headers says to characterize with a real one; this is
+    the flag that does it.
+
+    Only the post-layout stage uses it.  The characterize stage is a functional
+    3-way proof over input vectors -- gold, PDK reference and our netlist -- and
+    has no timing in it to be flattered.
+
+    The driver must be NON-INVERTING, and the defaults are a buffer's pins.
+    aion_char feeds it a ramp that always rises first and derives the expected
+    output edge from the cell's own unateness; nothing accounts for a driver
+    that flips the pin, so an inverting one inverts every expected level and the
+    run dies as "the output still had not settled" with the output pinned at the
+    opposite rail -- even at 1 fF, where nothing is too slow to settle.
+    """
+
+    cell: str
+    in_pin: str = "A"
+    out_pin: str = "X"
+
+    @property
+    def make_vars(self) -> tuple:
+        """The variables `aion-layout-flow` forwards to the layout tool."""
+        return (
+            f"DRIVER={self.cell}",
+            f"DRIVER_IN={self.in_pin}",
+            f"DRIVER_OUT={self.out_pin}",
+        )
+
+    def describe(self) -> str:
+        return f"{self.cell} ({self.in_pin} -> {self.out_pin})"
+
+
 @dataclass
 class Draw:
     """How the layout stage gets its generator written."""
@@ -256,7 +341,7 @@ class Draw:
     max_iters: int = 12
     timeout: int = 1800  # seconds per turn; one turn is DRC + LVS + edits
     model: str | None = "claude-opus-5"
-    effort: str | None = "low"
+    effort: str | None = "max"
     stream: bool = True
     claude: str = "claude"  # resolved on PATH before the stage starts
 
@@ -692,13 +777,29 @@ def _agent_turn(cell: Cell, run: Runner, draw: Draw, evidence: str, turn: int) -
     )
 
 
-def stage_post_layout(cell: Cell, run: Runner, corners: str, jobs: int) -> int:
+def stage_post_layout(
+    cell: Cell,
+    run: Runner,
+    corners: str,
+    jobs: int,
+    driver: Driver | None = None,
+    pex_mode: int = PEX_MODE_DEFAULT,
+) -> int:
     """PEX, the abutted PDK baseline, Liberty, the comparison and the export.
 
     Everything here is measured from the drawn cell.  The comparison against
     the abutted baseline is the one number that says whether the hand design
     was worth it, and it is computed from two Liberty files this stage wrote,
     not from a device count.
+
+    `driver` is what those two Liberty files were measured *with*.  Left unset
+    it is aion_char's ideal linear ramp, which is right for static CMOS and
+    wrong for every cell in this directory: a ramp is a zero-impedance driver,
+    and a transmission gate's input is a source/drain, so the driver stays in
+    series with the channel for the whole transition and the ramp flatters the
+    cell by exactly the effect NLDM cannot express.  `aion_layout flow` applies
+    it to the candidate and the baseline both -- comparing one stimulus against
+    the other would be a rigged comparison.
     """
     head(f"post-layout characterization  {cell.name}")
     if not cell.reference_split.exists() and not run.dry_run:
@@ -707,6 +808,13 @@ def stage_post_layout(cell: Cell, run: Runner, corners: str, jobs: int) -> int:
             f" — run the characterize stage first"
         )
         return 1
+    if driver is None:
+        warn(
+            "no --driver-cell: the Liberty will be measured against an ideal "
+            "ramp, which over-states any cell with a pass gate on an input path"
+        )
+    else:
+        info(f"stimulus   {driver.describe()} (candidate and baseline both)")
     result = run.host(
         "aion-layout-flow",
         [
@@ -717,6 +825,8 @@ def stage_post_layout(cell: Cell, run: Runner, corners: str, jobs: int) -> int:
             f"BASELINE={cell.reference_split}",
             f"CORNERS={corners}",
             f"JOBS={jobs}",
+            f"PEX_MODE={pex_mode}",
+            *(driver.make_vars if driver else ()),
         ],
         f"{cell.name}.flow",
     )
@@ -771,10 +881,8 @@ def _publish_views(cell: Cell) -> bool:
         return False
     rejected = sorted(final.glob("*.rejected"))
     if rejected:
-        fail("the exporter REFUSED to publish — "
-             + ", ".join(p.name for p in rejected))
-        info("that is a real finding about the cell, not something to work "
-             "around")
+        fail("the exporter REFUSED to publish — " + ", ".join(p.name for p in rejected))
+        info("that is a real finding about the cell, not something to work around")
         return False
 
     written = [p for p in sorted(final.iterdir()) if p.is_file()]
@@ -786,9 +894,11 @@ def _publish_views(cell: Cell) -> bool:
 
     libs = [p for p in written if p.suffix.lower() == ".lib"]
     if len(libs) > 1:
-        fail(f"{len(libs)} Liberty files exported. `merge_lib.py` and "
-             "`make pnr` both look for exactly <CELL>.lib, so per-corner "
-             "libs cannot be published. Re-run with --corners typ.")
+        fail(
+            f"{len(libs)} Liberty files exported. `merge_lib.py` and "
+            "`make pnr` both look for exactly <CELL>.lib, so per-corner "
+            "libs cannot be published. Re-run with --corners typ."
+        )
         return False
 
     # The exporter grades the abstract too, and a cell that fails there
@@ -817,8 +927,7 @@ def _publish_views(cell: Cell) -> bool:
     if png is not None:
         copied.append(png.name)
 
-    ok(f"published {len(copied)} view(s) to "
-       f"{cell.dir.relative_to(PROJECT_ROOT)}")
+    ok(f"published {len(copied)} view(s) to {cell.dir.relative_to(PROJECT_ROOT)}")
     info("  " + "  ".join(copied))
     return True
 
@@ -840,9 +949,11 @@ def _published_name(cell: Cell, path: Path) -> str | None:
             # The exporter's copy of the hand design.  Publishing it would
             # write the file over itself; the source IS the view.
             return None
-        warn(f"the exported {path.name} is not the netlist that went in — "
-             f"publishing it as {cell.name}.layout.spice, leaving the hand "
-             f"design alone")
+        warn(
+            f"the exported {path.name} is not the netlist that went in — "
+            f"publishing it as {cell.name}.layout.spice, leaving the hand "
+            f"design alone"
+        )
         return f"{cell.name}.layout.spice"
     return path.name
 
@@ -872,7 +983,7 @@ def _render_png(cell: Cell, gds: Path) -> Path | None:
     png = cell.dir / f"{cell.name}.png"
     try:
         render_gds(str(gds), str(png), title=cell.name)
-    except Exception as exc:            # noqa: BLE001 - see the docstring
+    except Exception as exc:  # noqa: BLE001 - see the docstring
         warn(f"could not render {png.name} — {exc}")
         return None
     return png
@@ -888,8 +999,10 @@ def _report_views(cell: Cell) -> None:
         for line in compare.read_text().splitlines():
             if line.startswith("COMPARE:") or "row sites" in line:
                 info(line.strip())
-    info(f"re-run scripts/merge_lib.py so the mapper sees the measured "
-         f"{cell.name}.lib instead of the provisional estimate")
+    info(
+        f"re-run scripts/merge_lib.py so the mapper sees the measured "
+        f"{cell.name}.lib instead of the provisional estimate"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +1016,8 @@ def main(argv=None) -> int:
         "  scripts/pdk_cell.py AION_mux2i_1\n"
         "  scripts/pdk_cell.py AION_mux2i_1 --from layout\n"
         "  scripts/pdk_cell.py AION_mux2i_1 --only characterize\n"
-        "  scripts/pdk_cell.py AION_mux2i_1 --from layout --draw manual\n",
+        "  scripts/pdk_cell.py AION_mux2i_1 --from layout --draw manual\n"
+        "  scripts/pdk_cell.py AION_mux4i_1 --driver-cell sg13g2_buf_2\n",
     )
     parser.add_argument("cell", help="cell name, e.g. AION_mux2i_1")
     parser.add_argument(
@@ -931,7 +1045,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--draw-timeout",
         type=int,
-        default=3600,
+        default=8400,
         help="seconds per agent turn (default: 3600)",
     )
     parser.add_argument(
@@ -941,7 +1055,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--effort",
-        default="low",
+        default="max",
         choices=("low", "medium", "high", "xhigh", "max", "none"),
         help="how hard it thinks per turn (default: low)",
     )
@@ -956,6 +1070,38 @@ def main(argv=None) -> int:
         help="Liberty corners to characterize (default: typ; "
         "'all' publishes one .lib per corner, which "
         "`make pnr` cannot group)",
+    )
+    parser.add_argument(
+        "--driver-cell",
+        metavar="NAME",
+        help="characterize against this NON-INVERTING cell instead of an ideal "
+        "ramp, the way vendor libraries do (e.g. sg13g2_buf_2; an "
+        "inverter breaks the run). Every cell here has a "
+        "pass gate on an input path, where a ramp is a zero-impedance "
+        "driver and so the most optimistic case there is. Applied to the "
+        "candidate and the baseline both. Post-layout stage only",
+    )
+    parser.add_argument(
+        "--driver-input",
+        metavar="PIN",
+        default="A",
+        help="input pin of --driver-cell (default: A)",
+    )
+    parser.add_argument(
+        "--driver-output",
+        metavar="PIN",
+        default="X",
+        help="output pin of --driver-cell (default: X, the sg13g2 buffers' output)",
+    )
+    parser.add_argument(
+        "--pex-mode",
+        type=int,
+        default=PEX_MODE_DEFAULT,
+        choices=(1, 2, 3),
+        help=f"parasitic extraction mode: 1 C-decoupled, 2 C-coupled, 3 full RC "
+        f"(default here: {PEX_MODE_DEFAULT}, C-coupled -- see PEX_MODE_DEFAULT "
+        f"for why the extension differs from aion_layout's own default of 3). "
+        f"Applies to the candidate and the abutted baseline both",
     )
     parser.add_argument(
         "--jobs", type=int, default=8, help="parallel ngspice jobs (default: 8)"
@@ -973,6 +1119,11 @@ def main(argv=None) -> int:
     cell = Cell(args.cell)
     cell.require_sources()
     run = Runner(dry_run=args.dry_run, quiet=args.quiet)
+    driver = (
+        Driver(args.driver_cell, args.driver_input, args.driver_output)
+        if args.driver_cell
+        else None
+    )
     draw = Draw(
         mode=args.draw,
         max_iters=args.max_iters,
@@ -1007,6 +1158,11 @@ def main(argv=None) -> int:
     info(f"reference  {cell.verilog.relative_to(PROJECT_ROOT)}")
     info(f"netlist    {cell.spice.relative_to(PROJECT_ROOT)}")
     info(f"stages     {' -> '.join(todo)}")
+    if "post-layout" in todo:
+        info(
+            "stimulus   "
+            + (driver.describe() if driver else "ideal ramp (no --driver-cell)")
+        )
     if "layout" in todo:
         info(
             f"draw       {draw.mode}"
@@ -1023,7 +1179,9 @@ def main(argv=None) -> int:
         elif stage == "layout":
             code = stage_layout(cell, run, args.jobs, draw)
         else:
-            code = stage_post_layout(cell, run, args.corners, args.jobs)
+            code = stage_post_layout(
+                cell, run, args.corners, args.jobs, driver, args.pex_mode
+            )
         if code == 2:
             # "not drawn yet" is a stopping point, not a failure: the layout
             # is waiting on another turn or on a human, and saying FAILED

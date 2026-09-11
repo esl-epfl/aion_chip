@@ -26,9 +26,16 @@ class SynthStep(Step):
         return self.outdir / "nl" / "tt_um_aion.nl.v"
 
     def inputs(self, cfg: Config) -> list:
-        return [paths.PROJECT_ROOT / "src" / "rtl",
-                paths.PROJECT_ROOT / "implementation" / "config.json",
-                paths.PROJECT_ROOT / "implementation" / "constraints" / "aion.sdc"]
+        sources = [paths.PROJECT_ROOT / "src" / "rtl",
+                   paths.PROJECT_ROOT / "implementation" / "config.json",
+                   paths.PROJECT_ROOT / "implementation" / "constraints" / "aion.sdc"]
+        # The extended Liberty is rebuilt from these on every run, so a cell
+        # added or recharacterized here is a changed input to synthesis --
+        # which is what makes every later step read STALE instead of quietly
+        # standing on a netlist mapped against a different cell library.
+        if cfg.PDK_EXT:
+            sources.append(paths.IMPL_DIR / "pdk_extension")
+        return sources
 
     def outputs(self, cfg: Config) -> list:
         return [self.outdir / "nl" / f"{cfg.TOP}.nl.v",
@@ -44,6 +51,9 @@ class SynthStep(Step):
         run.check(
             run.host("synth", [
                 f"SYNTH_OUT_DIR={self.outdir}",
+                # Default-on in the Makefile, so it only has to be forwarded
+                # to turn it off.
+                *([] if cfg.PDK_EXT else ["PDK_EXT=0"]),
                 *flag("LENIENT", cfg.LENIENT),
             ], name="synth"),
             "synthesis",

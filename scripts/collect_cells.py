@@ -92,6 +92,22 @@ VIA_LANDING = (
 )
 VIA_LANDING_SHORT_SIDE = 0.21
 
+# Metal2 spacing, from the SPACINGTABLE in sg13g2_tech.lef: 0.21 um for any
+# shape under 0.39 um wide, which a via landing and a routed wire both are.
+#
+# It applies to the pad *above* the via, and it is the rule that decides
+# whether a pin is reachable at all. The router works down from RT_MIN_LAYER,
+# which is Metal2 in this design (implementation/config.json) -- it never
+# routes on Metal1 -- so every pin is entered through a Via1, and a via whose
+# Metal2 pad cannot keep 0.21 um from the cell's own Metal2 is a via that
+# cannot be placed. A pin with none is not "hard to reach", it is unreachable,
+# and detailed routing aborts on it with DRT-0073.
+#
+# Checked against the shipped library: all 283 signal pins of sg13g2_stdcell
+# pass, and so do the mined AION cells. The two that do not are
+# AION_mux2i_1/I2 and AION_mux2i_2/I2 -- exactly the pins TritonRoute names.
+METAL2_SPACING = 0.21
+
 # The layer a via off a port lands on, so that the macro's own obstructions
 # there can be checked for covering it.
 LAYER_ABOVE = {
@@ -109,7 +125,42 @@ UNROUTABLE_MARKERS = (
     "no geometry on a routing layer",
     "no via can land on it",
     "every via landing is covered",
+    "no Via1 can be placed on it",
 )
+
+
+# The PDK-extension cells (implementation/pdk_extension/<CELL>/) are NOT
+# discovered by stem, and the difference is not cosmetic. That directory holds
+# the cell's sources beside the views the exporter published, and three of the
+# names would group wrong:
+#
+#   <CELL>.v               the hand-written *structural* gold reference, built
+#                          out of PDK cells. Correct for the post-synthesis
+#                          simulation and wrong here: after PnR the cell is a
+#                          LEAF with its own SDF entries, so the model PnR and
+#                          the SDF agree on is <CELL>.layout.v -- the solved
+#                          behavioural view, with the specify block an IOPATH
+#                          record annotates.
+#   <CELL>.layout.v        would group under the stem "<CELL>.layout" -- a
+#                          phantom cell with a Verilog view and no LEF.
+#   <CELL>.provisional.lib likewise "<CELL>.provisional", a phantom with only
+#                          a Liberty. It is also a floorplan *estimate*, and a
+#                          run timed against an estimate is not a result.
+#
+# So the views are named, not inferred. A cell that has not been drawn has no
+# <CELL>.lef and is simply not offered to PnR, which is the truth about it.
+PDK_EXT_VIEW_SUFFIX = {
+    "lef": ".lef",
+    "lib": ".lib",
+    "gds": ".gds",
+    "verilog": ".layout.v",
+    "spice": ".spice",
+    "cdl": ".cdl",
+}
+
+# Left over from when pdk_cell.py published into a shared directory instead of
+# beside each cell's sources; a stale one is not a cell.
+PDK_EXT_NOT_A_CELL = ("views",)
 
 
 @dataclass
@@ -154,6 +205,30 @@ def collect_cells(cells_dir: str) -> List[Cell]:
             cell.views[view] = path
 
     return [by_name[name] for name in sorted(by_name)]
+
+
+def collect_pdk_extension_cells(ext_dir: str) -> List[Cell]:
+    """One Cell per implementation/pdk_extension/<CELL>/, views named exactly.
+
+    Same Cell shape as collect_cells(), so the LEF and Liberty checks below
+    grade a hand-designed cell exactly as they grade a drawn one -- it stands
+    in the same rows, next to the same neighbours, and gets the placer's
+    treatment either way.
+    """
+    root = os.path.abspath(ext_dir)
+    cells: List[Cell] = []
+    for name in sorted(os.listdir(root)):
+        directory = os.path.join(root, name)
+        if (not os.path.isdir(directory) or name.startswith(".")
+                or name in PDK_EXT_NOT_A_CELL):
+            continue
+        cell = Cell(name=name)
+        for view, suffix in PDK_EXT_VIEW_SUFFIX.items():
+            path = os.path.join(directory, f"{name}{suffix}")
+            if os.path.isfile(path):
+                cell.views[view] = path
+        cells.append(cell)
+    return cells
 
 
 # ------------------------------------------------------------------
@@ -236,15 +311,26 @@ def centre_span(lo: float, hi: float, pad: float, may_spill: bool):
     return None
 
 
-def check_via_landing(rect, obstructions) -> str:
+def check_via_landing(rect, obstructions, spacing: float = METAL2_SPACING) -> str:
     """Whether a via can land on one port rect: 'ok', 'nofit' or 'blocked'.
 
     'nofit' -- the rect is under 0.21um across, so no via can be placed on it
-    however well it sits on the grid. 'blocked' -- a pad fits, but the macro's
-    own obstructions on the layer above cover every position the via centre
-    could take. That second one is what `magic lef write -pinonly` produces
-    when a cell routes its output up to Metal2 and only labels the Metal1 end:
-    the strap the pin needs is exported as an obstruction sitting on the pin.
+    however well it sits on the grid. 'blocked' -- a pad fits, but the shapes
+    on the layer above leave nowhere for the via centre to sit. That second one
+    is what `magic lef write -pinonly` produces when a cell routes its output
+    up to Metal2 and only labels the Metal1 end: the strap the pin needs is
+    exported as an obstruction sitting on the pin.
+
+    `obstructions` is every shape of every *other* net -- the OBS block and the
+    other pins both -- because a pad that shorts to another pin is as unusable
+    as one that shorts to an obstruction.
+
+    Each of those keeps `spacing` as well as its own extent: the pad above the
+    via is a Metal2 shape like any other, and Metal2 that ends 0.20 um from a
+    neighbouring net is not a legal place to put it. That margin is the whole
+    check on a tightly routed cell -- AION_mux2i_1/I2 has two gate pads with
+    room for a via and the cell's own Metal2 risers 0.015 um to one side of
+    each, so the pads are wide enough and the pin is still unreachable.
     """
     layer, x1, y1, x2, y2 = rect
     if layer not in LAYER_ABOVE:          # topmost routing layer, nothing above
@@ -258,10 +344,11 @@ def check_via_landing(rect, obstructions) -> str:
             continue
         fits = True
         # Where the via centre may sit for the pad below to stay on the port,
-        # against where it may not for the pad above to clear an obstruction.
+        # against where it may not for the pad above to clear a neighbour.
         centres = (span_x[0], span_y[0], span_x[1], span_y[1])
+        pad_x, pad_y = above_w / 2 + spacing, above_h / 2 + spacing
         blocked = [
-            (bx1 - above_w / 2, by1 - above_h / 2, bx2 + above_w / 2, by2 + above_h / 2)
+            (bx1 - pad_x, by1 - pad_y, bx2 + pad_x, by2 + pad_y)
             for _, bx1, by1, bx2, by2 in above
         ]
         if not region_covered(centres, blocked):
@@ -278,18 +365,33 @@ def check_pin_access(macro: str, body: str) -> List[str]:
       * the port has geometry on a routing layer at all;
       * it covers a track line, so a wire can run onto it;
       * a via can land on it -- the port is at least one landing pad wide, and
-        the macro's own obstructions on the layer above do not sit on top of
-        the pad.
+        the shapes of every other net on the layer above leave somewhere for
+        the pad to sit, with Metal2 spacing.
+
+    That third one is not a nicety. RT_MIN_LAYER is Metal2 in this design, so
+    the router never puts a wire on Metal1: every pin is entered through a
+    Via1, and a pin on which no Via1 can be placed is unreachable however well
+    it sits on the grid. It is also the failure that does not look like one --
+    the abstract is legal, the cell places, and detailed routing aborts an
+    hour later with DRT-0073.
 
     This is the static half of TritonRoute's pin access: necessary, not
     sufficient, because it cannot see the neighbouring instances. It is worth
-    a second here because DRT-0073 is a hard abort in detailed routing an hour
-    into the flow, not a DRC that LENIENT=1 can downgrade. All 283 signal pins
-    of the PDK sg13g2_stdcell library pass all three (the tightest is
-    sg13g2_inv_1/Y at 0.23um, against the 0.21um landing pad).
+    a second here because DRT-0073 is a hard abort, not a DRC that LENIENT=1
+    can downgrade. All 283 signal pins of the PDK sg13g2_stdcell library pass
+    all three, and so do the mined AION cells (the tightest is sg13g2_inv_1/Y
+    at 0.23um, against the 0.21um landing pad).
     """
     obs_block = OBS_BLOCK_RE.search(body)
-    obstructions = list(layer_rects(obs_block.group(1))) if obs_block else []
+    base = list(layer_rects(obs_block.group(1))) if obs_block else []
+
+    # Every pin's shapes, so each pin can be graded against the others. A pad
+    # that shorts to a neighbouring pin is as unusable as one that shorts to
+    # an obstruction, and in a cell that routes a net over its own pad band
+    # the neighbouring pin is what it hits first.
+    others = {}
+    for pin, pin_body in PIN_BLOCK_RE.findall(body):
+        others[pin] = list(layer_rects(pin_body))
 
     problems = []
     for pin, pin_body in PIN_BLOCK_RE.findall(body):
@@ -298,6 +400,8 @@ def check_pin_access(macro: str, body: str) -> List[str]:
             continue
         if use is None and pin.upper() in ("VDD", "VSS"):
             continue
+        obstructions = base + [r for name, rects in others.items()
+                               if name != pin for r in rects]
 
         layers = []
         for line in pin_body.splitlines():
@@ -346,12 +450,14 @@ def check_pin_access(macro: str, body: str) -> List[str]:
                 dict.fromkeys(LAYER_ABOVE[lay] for lay in layers if lay in LAYER_ABOVE)
             )
             problems.append(
-                f"{macro}: PIN {pin} is big enough for a via, but every via "
-                f"landing is covered by the macro's own OBS on {above} -- the "
-                "pin's own strap counts, because only the labelled rectangle "
-                "is written out as a PORT. Detailed routing aborts with "
-                f"'DRT-0073 No access point'; declare the port on {above} "
-                f"where that metal already is, or move the {above} off the pin"
+                f"{macro}: PIN {pin} is wide enough for a via, but no Via1 can "
+                f"be placed on it: every position for the {above} pad either "
+                f"sits on another net's {above} or comes within "
+                f"{METAL2_SPACING}um of it. The router works down from "
+                "RT_MIN_LAYER=Metal2 and never routes on Metal1, so this pin "
+                "cannot be entered at all and detailed routing aborts with "
+                "'DRT-0073 No access point'. Widen the port, or move this "
+                f"cell's own {above} out from beside it"
             )
         else:
             problems.append(
@@ -432,10 +538,19 @@ def check_lib(path: str, cell_name: str) -> List[str]:
     return []
 
 
-def check_cells(cells_dir: str, strict: bool) -> int:
-    cells = collect_cells(cells_dir)
+def check_cells(groups, strict: bool) -> int:
+    """Grade every cell PnR is about to be handed, whoever drew it.
+
+    `groups` is a list of (label, cells). The mined cells and the
+    hand-designed ones arrive by different routes -- step 6 publishes the
+    first into implementation/cells/, the second are authored under
+    implementation/pdk_extension/ -- but the placer and the router make no
+    such distinction, so neither does this.
+    """
+    cells = [cell for _, group in groups for cell in group]
     if not cells:
-        print(f"No custom cells found under {cells_dir}/ — running with the PDK "
+        labels = " or ".join(label for label, _ in groups) or "the cell directory"
+        print(f"No custom cells found under {labels} — running with the PDK "
               "standard cell library only.")
         return 0
 
@@ -443,27 +558,32 @@ def check_cells(cells_dir: str, strict: bool) -> int:
     warnings = 0
     all_problems: List[str] = []
 
-    print(f"Custom cells under {cells_dir}/:")
-    for cell in cells:
-        have = ", ".join(sorted(cell.views)) or "nothing"
-        print(f"  {cell.name}: {have}")
+    for label, group in groups:
+        if not group:
+            continue
+        print(f"Custom cells under {label}/:")
+        for cell in group:
+            have = ", ".join(sorted(cell.views)) or "nothing"
+            print(f"  {cell.name}: {have}")
 
-        for view in cell.missing(REQUIRED_VIEWS):
-            print(f"    ERROR   missing {view} view ({EXTRA_KEY_BY_VIEW[view]})")
-            errors += 1
-        for view in cell.missing(RECOMMENDED_VIEWS):
-            print(f"    warning missing {view} view ({EXTRA_KEY_BY_VIEW[view]})")
-            warnings += 1
+            for view in cell.missing(REQUIRED_VIEWS):
+                print(f"    ERROR   missing {view} view "
+                      f"({EXTRA_KEY_BY_VIEW[view]})")
+                errors += 1
+            for view in cell.missing(RECOMMENDED_VIEWS):
+                print(f"    warning missing {view} view "
+                      f"({EXTRA_KEY_BY_VIEW[view]})")
+                warnings += 1
 
-        if "lef" in cell.views:
-            for problem in check_lef(cell.views["lef"]):
-                print(f"    ERROR   {problem}")
-                all_problems.append(problem)
-                errors += 1
-        if "lib" in cell.views:
-            for problem in check_lib(cell.views["lib"], cell.name):
-                print(f"    ERROR   {problem}")
-                errors += 1
+            if "lef" in cell.views:
+                for problem in check_lef(cell.views["lef"]):
+                    print(f"    ERROR   {problem}")
+                    all_problems.append(problem)
+                    errors += 1
+            if "lib" in cell.views:
+                for problem in check_lib(cell.views["lib"], cell.name):
+                    print(f"    ERROR   {problem}")
+                    errors += 1
 
     print(f"{len(cells)} cell(s), {errors} error(s), {warnings} warning(s)")
 
@@ -508,16 +628,30 @@ def main():
     )
     parser.add_argument("cells_dir", help="Directory to scan.")
     parser.add_argument(
+        "--pdk-ext-dir",
+        default=None,
+        help="implementation/pdk_extension/, whose cells are named views "
+        "rather than grouped by stem. Its cells are checked and offered to "
+        "PnR exactly like the mined ones.",
+    )
+    parser.add_argument(
         "--lenient",
         action="store_true",
         help="Report problems but exit 0.",
     )
     args = parser.parse_args()
 
-    if not os.path.isdir(args.cells_dir):
+    groups = []
+    if os.path.isdir(args.cells_dir):
+        groups.append((args.cells_dir, collect_cells(args.cells_dir)))
+    else:
         print(f"No custom cells directory at {args.cells_dir}/ — nothing to do.")
+    if args.pdk_ext_dir is not None and os.path.isdir(args.pdk_ext_dir):
+        groups.append((args.pdk_ext_dir,
+                       collect_pdk_extension_cells(args.pdk_ext_dir)))
+    if not groups:
         return 0
-    return check_cells(args.cells_dir, strict=not args.lenient)
+    return check_cells(groups, strict=not args.lenient)
 
 
 if __name__ == "__main__":
