@@ -11,7 +11,15 @@
     "cannot be trusted across runs."
   ],
   "cells": {
+    "E0:X:1:A0|I0:A0|I0:A1|I0:S|I1:A1|I1:S|N0:sg13g2_mux2|N1:sg13g2_mux2|O0:X|O1:X": "AION_mux2_0",
+    "E0:X:1:A|I0:A|I0:B|I1:B|N0:sg13g2_xor2|N1:sg13g2_xor2|O0:X|O1:X": "AION_xor2_8",
+    "E0:X:1:B|I0:A|I0:B|I1:A|N0:sg13g2_xor2|N1:sg13g2_xor2|O0:X|O1:X": "AION_xor2_5",
+    "E0:Y:1:A|I0:A|I0:B|I1:B|N0:sg13g2_xnor2|N1:sg13g2_xnor2|O0:Y|O1:Y": "AION_xnor2_1",
+    "E0:Y:1:A|I0:A|I0:B|I1:B|N0:sg13g2_xnor2|N1:sg13g2_xor2|O0:Y|O1:X": "AION_xnor2_xor2_7",
     "E0:Y:1:B1|I0:A|I0:B|I1:A1|I1:A2|N0:sg13g2_nand2|N1:sg13g2_o21ai|O1:Y": "AION_nand2_o21ai_0",
+    "E0:Y:1:B|I0:A|I0:B|I1:A|N0:sg13g2_xnor2|N1:sg13g2_xnor2|O0:Y|O1:Y": "AION_xnor2_4",
+    "E0:Y:1:B|I0:A|I0:B|I1:A|N0:sg13g2_xnor2|N1:sg13g2_xor2|O0:Y|O1:X": "AION_xnor2_xor2_2",
+    "E1:X:0:B|I0:A|I1:A|I1:B|N0:sg13g2_xnor2|N1:sg13g2_xor2|O0:Y|O1:X": "AION_xnor2_xor2_9",
     "E1:Y:0:B1|I0:A1|I0:A2|I1:A|I1:B|N0:sg13g2_a21oi|N1:sg13g2_nor2|O0:Y": "AION_a21oi_nor2_1"
   }
 }

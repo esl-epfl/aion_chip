@@ -22,6 +22,7 @@ proc aion_env {name default} {
 set clk_port     [lindex [aion_env CLOCK_PORT clk] 0]
 set clk_period   [aion_env CLOCK_PERIOD 20.0]
 set io_pct       [aion_env IO_DELAY_CONSTRAINT 20]
+set io_min_pct   [aion_env IO_MIN_DELAY_CONSTRAINT 0]
 set uncertainty  [aion_env CLOCK_UNCERTAINTY_CONSTRAINT 0.25]
 set clk_tran     [aion_env CLOCK_TRANSITION_CONSTRAINT 0.15]
 set derate_pct   [aion_env TIME_DERATING_CONSTRAINT 5]
@@ -57,8 +58,33 @@ if { [aion_env OPENLANE_SDC_IDEAL_CLOCKS 0] } {
 # Every port other than clk is a synchronous, single-cycle interface to
 # whatever drives the tile. Budget IO_DELAY_CONSTRAINT percent of the
 # period on each side, leaving the rest for internal logic.
+#
+# Max and min are different questions and need different numbers:
+#
+#   max is a BUDGET -- how much of the period the outside world may spend
+#       before the data has to be inside this tile. 20% is a choice.
+#   min is a FACT about the driver -- how soon after the edge the bus can
+#       start moving. The harness launches ui_in/uio_in from its own flops
+#       on this same clock, so the answer is one external clock-to-Q, not
+#       io_delay. IO_MIN_DELAY_CONSTRAINT = 0 is the conservative reading
+#       of that: the bus may change on the edge itself.
+#
+# A bare `set_input_delay $io_delay` sets both, and that is the trap: it
+# tells STA the inputs sit still for the first 10ns of every cycle, so
+# every input-to-register hold check passes by inspection and the resizer
+# is given nothing to repair. The shortest of those paths is one input
+# buffer plus one gate into a flop's D -- under 0.5ns -- against a clock
+# tree about that deep, so some of those flops really do see the next
+# byte before their own clock edge arrives. Nothing reports it: the
+# checkers see a clean design, and Icarus implements no timing checks, so
+# the post-PnR simulation latches the wrong value in silence. With a real
+# min, hold repair after CTS buffers the offenders instead.
+#
+# The same asymmetry applies on the way out: min is what the receiver
+# needs held, not what the wire costs.
 # ----------------------------------------------------------------
-set io_delay [expr {$clk_period * $io_pct / 100.0}]
+set io_delay     [expr {$clk_period * $io_pct     / 100.0}]
+set io_min_delay [expr {$clk_period * $io_min_pct / 100.0}]
 
 set data_inputs [all_inputs]
 set clk_index   [lsearch $data_inputs $clk_pin]
@@ -66,10 +92,13 @@ if { $clk_index >= 0 } {
   set data_inputs [lreplace $data_inputs $clk_index $clk_index]
 }
 
-puts "\[AION SDC] input/output delay ${io_delay}ns (${io_pct}% of period)"
+puts "\[AION SDC] input/output delay max ${io_delay}ns (${io_pct}% of period),\
+ min ${io_min_delay}ns (${io_min_pct}%)"
 
-set_input_delay  $io_delay -clock $clk $data_inputs
-set_output_delay $io_delay -clock $clk [all_outputs]
+set_input_delay  -max $io_delay     -clock $clk $data_inputs
+set_input_delay  -min $io_min_delay -clock $clk $data_inputs
+set_output_delay -max $io_delay     -clock $clk [all_outputs]
+set_output_delay -min $io_min_delay -clock $clk [all_outputs]
 
 # ----------------------------------------------------------------
 # Drive and load

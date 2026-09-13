@@ -72,13 +72,13 @@ class Config:
     # ELITE_METRIC        saved-area | occurrences | saved-area-per-cell
     MAX_SIZE: int = 2
     MIN_OCCURRENCES: int = 2
-    MIN_SELECTED: int | None = None
+    MIN_SELECTED: int | None = 24
     AREA_FACTOR: float = 0.85
-    MAX_OUTPUTS: int | None = 1
+    MAX_OUTPUTS: int | None = 2
     MAX_INPUTS: int | None = 5
     JOBS: int | None = None
     CELL_PREFIX: str = "AION_"
-    ELITE_COUNT: int | None = 2
+    ELITE_COUNT: int | None = 10
     ELITE_METRIC: str = "saved-area"
 
     # =====================================================================
@@ -149,8 +149,8 @@ class Config:
     #                 the command line) leaves the CLI's own setting alone.
     LAYOUT_CORNERS: str = "typ"
     LAYOUT_JOBS: int = 8
-    DRAW_MODE: str = "manual"
-    DRAW_JOBS: int = 1
+    DRAW_MODE: str = "auto"
+    DRAW_JOBS: int = 2
     DRAW_STREAM: bool = True
     DRAW_MAX_ITERS: int = 12
     DRAW_TIMEOUT: int = 1800

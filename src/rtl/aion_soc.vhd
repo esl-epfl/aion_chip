@@ -26,39 +26,42 @@ architecture arch of aion_soc is
 
   component posit_alu is
     port (
-      clk    : in  std_logic;
-      rst_n  : in  std_logic;
-      opA    : in  std_logic_vector(31 downto 0);
-      opB    : in  std_logic_vector(31 downto 0);
-      opcode : in  std_logic_vector(3 downto 0);
-      start  : in  std_logic;
-      result : out std_logic_vector(31 downto 0);
-      done   : out std_logic
+      clk       : in  std_logic;
+      rst_n     : in  std_logic;
+      opA       : in  std_logic_vector(31 downto 0);
+      opB       : in  std_logic_vector(31 downto 0);
+      opcode    : in  std_logic_vector(3 downto 0);
+      precision : in  std_logic;
+      start     : in  std_logic;
+      result    : out std_logic_vector(31 downto 0);
+      done      : out std_logic
     );
   end component posit_alu;
 
   component aion_interface is
     port (
-      clk     : in  std_ulogic;
-      rst_n   : in  std_ulogic;
-      ui_in   : in  std_ulogic_vector(7 downto 0);
-      uio_in  : in  std_ulogic_vector(7 downto 0);
-      uo_out  : out std_ulogic_vector(7 downto 0);
-      opA     : out std_logic_vector(31 downto 0);
-      opB     : out std_logic_vector(31 downto 0);
-      opcode  : out std_logic_vector(3 downto 0);
-      start   : out std_logic;
-      result  : in  std_logic_vector(31 downto 0);
-      done    : in  std_logic
+      clk       : in  std_ulogic;
+      rst_n     : in  std_ulogic;
+      ui_in     : in  std_ulogic_vector(7 downto 0);
+      uio_in    : in  std_ulogic_vector(7 downto 0);
+      uo_out    : out std_ulogic_vector(7 downto 0);
+      opA       : out std_logic_vector(31 downto 0);
+      opB       : out std_logic_vector(31 downto 0);
+      opcode    : out std_logic_vector(3 downto 0);
+      precision : out std_logic;
+      start     : out std_logic;
+      result    : in  std_logic_vector(31 downto 0);
+      done      : in  std_logic
     );
   end component aion_interface;
 
-  signal opA    : std_logic_vector(31 downto 0);
-  signal opB    : std_logic_vector(31 downto 0);
-  signal opcode : std_logic_vector(3 downto 0);
-  signal start  : std_logic;
-  signal result_i : std_logic_vector(31 downto 0);
-  signal done_i : std_logic;
+  signal opA       : std_logic_vector(31 downto 0);
+  signal opB       : std_logic_vector(31 downto 0);
+  signal opcode    : std_logic_vector(3 downto 0);
+  signal precision : std_logic;
+  signal start     : std_logic;
+  signal result_i  : std_logic_vector(31 downto 0);
+  signal done_i    : std_logic;
 
 begin
 
@@ -67,29 +70,31 @@ begin
 
   aion_interface_inst : component aion_interface
     port map (
-      clk    => std_ulogic(clk),
-      rst_n  => std_ulogic(rst_n),
-      ui_in  => ui_in,
-      uio_in => uio_in,
-      uo_out => uo_out,
-      opA    => opA,
-      opB    => opB,
-      opcode => opcode,
-      start  => start,
-      result => result_i,
-      done   => done_i
+      clk       => std_ulogic(clk),
+      rst_n     => std_ulogic(rst_n),
+      ui_in     => ui_in,
+      uio_in    => uio_in,
+      uo_out    => uo_out,
+      opA       => opA,
+      opB       => opB,
+      opcode    => opcode,
+      precision => precision,
+      start     => start,
+      result    => result_i,
+      done      => done_i
     );
 
   posit_alu_inst : component posit_alu
     port map (
-      clk    => clk,
-      rst_n  => rst_n,
-      opA    => opA,
-      opB    => opB,
-      opcode => opcode,
-      start  => start,
-      result => result_i,
-      done   => done_i
+      clk       => clk,
+      rst_n     => rst_n,
+      opA       => opA,
+      opB       => opB,
+      opcode    => opcode,
+      precision => precision,
+      start     => start,
+      result    => result_i,
+      done      => done_i
     );
 
 end architecture arch;

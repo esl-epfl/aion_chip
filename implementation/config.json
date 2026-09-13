@@ -27,6 +27,8 @@
   "VHDL_FILES": [
     "dir::rtl/add.vhd",
     "dir::rtl/mult.vhd",
+    "dir::rtl/add_16.vhd",
+    "dir::rtl/mult_16.vhd",
     "dir::rtl/posit_compare.vhd",
     "dir::rtl/posit_bitwise.vhd",
     "dir::rtl/posit_alu.vhd",
@@ -51,8 +53,7 @@
   "SYNTH_TIE_UNDEFINED": "low",
 
   "FP_SIZING": "absolute",
-  "DIE_AREA": [0, 0, 636.96, 313.74],
-  "CORE_AREA": [10, 10, 625, 305],
+  "DIE_AREA": [0, 0, 840, 300],
   "PL_TARGET_DENSITY_PCT": 45,
 
   "RUN_HEURISTIC_DIODE_INSERTION": true,

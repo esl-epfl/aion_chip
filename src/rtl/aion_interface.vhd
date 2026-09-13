@@ -12,26 +12,32 @@ library work;
 
 entity aion_interface is
   port (
-    clk     : in  std_ulogic;
-    rst_n   : in  std_ulogic;
-    ui_in   : in  std_ulogic_vector(7 downto 0);  -- address/control
-    uio_in  : in  std_ulogic_vector(7 downto 0);  -- write data
-    uo_out  : out std_ulogic_vector(7 downto 0);  -- read data
-    opA     : out std_logic_vector(31 downto 0);
-    opB     : out std_logic_vector(31 downto 0);
-    opcode  : out std_logic_vector(3 downto 0);
-    start   : out std_logic;
-    result  : in  std_logic_vector(31 downto 0);
-    done    : in  std_logic
+    clk       : in  std_ulogic;
+    rst_n     : in  std_ulogic;
+    ui_in     : in  std_ulogic_vector(7 downto 0);  -- address/control
+    uio_in    : in  std_ulogic_vector(7 downto 0);  -- write data
+    uo_out    : out std_ulogic_vector(7 downto 0);  -- read data
+    opA       : out std_logic_vector(31 downto 0);
+    opB       : out std_logic_vector(31 downto 0);
+    opcode    : out std_logic_vector(3 downto 0);
+    precision : out std_logic;                      -- 0 = Posit<32,2>, 1 = Posit<16,2>
+    start     : out std_logic;
+    result    : in  std_logic_vector(31 downto 0);
+    done      : in  std_logic
   );
 end entity aion_interface;
 
 architecture arch of aion_interface is
 
-  -- Byte-addressable register file. A Posit<32,2> operand is four bytes, so
-  -- the map needs fourteen addresses where the Posit<16,2> one needed eight,
+  -- Byte-addressable register file. The widest operand is four bytes, so the
+  -- map needs fourteen addresses where a Posit<16,2>-only design needed eight,
   -- and the address field grows from ui_in(2:0) to ui_in(3:0). ui_in(6:4) is
   -- now unread; ui_in(7) is still the direction bit.
+  --
+  -- A Posit<16,2> operand is written into the low two bytes of the same
+  -- registers and the upper two are simply not read by the ALU, so the map is
+  -- the same at both precisions -- `control(4)` says which one a command
+  -- means.
   signal reg_opA      : std_ulogic_vector(31 downto 0);
   signal reg_opB      : std_ulogic_vector(31 downto 0);
   signal reg_control  : std_ulogic_vector(7 downto 0);
@@ -55,15 +61,17 @@ begin
   -- ----------------------------------------------------------------
   -- Map verbose internal signals to register file
   -- ----------------------------------------------------------------
-  opA    <= std_logic_vector(reg_opA);
-  opB    <= std_logic_vector(reg_opB);
-  opcode <= std_logic_vector(reg_control(3 downto 0));
-  start  <= std_logic(start_pulse);
+  opA       <= std_logic_vector(reg_opA);
+  opB       <= std_logic_vector(reg_opB);
+  opcode    <= std_logic_vector(reg_control(3 downto 0));
+  precision <= std_logic(reg_control(4));
+  start     <= std_logic(start_pulse);
 
   -- ----------------------------------------------------------------
   -- Start pulse generation
   -- A write to address 8 with bit 7 set generates a one-cycle pulse.
-  -- Bits 3:0 of reg_control carry the ALU opcode; bits 6:4 are unused.
+  -- Bits 3:0 of reg_control carry the ALU opcode and bit 4 the operand width
+  -- (0 = Posit<32,2>, 1 = Posit<16,2>); bits 6:5 are unused.
   -- ----------------------------------------------------------------
   start_pulse <= '1' when (write_en = '1' and addr = "1000" and uio_in(7) = '1') else '0';
 

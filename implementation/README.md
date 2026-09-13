@@ -39,30 +39,51 @@ wanted again: set `LIBRELANE_DEF_TEMPLATE` to it and change `DIE_AREA` to that
 tile's row of TT's `tile_sizes.yaml` — the two have to agree, and nothing checks
 it for you.
 
-## What the Posit<32,2> ALU costs
+## What the ALU costs
 
-The design is one `PositAdder`, one `PositMult`, a comparator and a bitwise
-unit — no MAC array and no size generic any more. What sizes this macro is the
-posit width, and it is not a free parameter: it is what the arithmetic is.
+The design is an adder and a multiplier per posit width — `PositAdder` /
+`PositMult` at Posit<32,2>, `PositAdder16` / `PositMult16` at Posit<16,2> —
+plus one comparator and one bitwise unit shared between them. No MAC array and
+no size generic: the two widths are both built, and `control[4]` picks which
+pair's answer reaches `result`.
 
 Measured through `make synth` on the IHP SG13G2 typical corner, with each unit
 also synthesised alone (`yosys … stat -liberty sg13g2_stdcell_typ_1p20V_25C`):
 
 | | Posit<16,2> | Posit<32,2> | Factor |
 | --- | ---: | ---: | ---: |
-| `PositAdder` | 8,850 um² | 21,663 um² | 2.4x |
-| `PositMult` | 19,781 um² | 61,864 um² | 3.1x |
-| whole design | 36,631 um² | **89,140 um²** | 2.4x |
-| instances | — | 7,744 | |
+| adder | 9,204 um² | 21,558 um² | 2.3x |
+| multiplier | 16,684 um² | 61,774 um² | 3.7x |
 
 The multiplier is the whole story. A Posit<16,2> fraction multiply is one
 DSP-shaped block; a Posit<32,2> one is a 29 x 29 partial-product array with a
-compressor tree, which is why `mult.vhd` grew from 732 lines to 2,113 and why
-it alone is 69% of the chip.
+compressor tree, which is why `mult.vhd` is 2,113 lines against `mult_16.vhd`'s
+612, and why it alone is well over half the chip.
+
+Carrying both widths rather than one:
+
+| | Posit<32,2> only | both widths |
+| --- | ---: | ---: |
+| cell area | 85,878 um² | **106,452 um²** |
+| instances | 7,633 | 9,622 |
+
++24% area for the second precision — less than the narrow pair's 25,888 um²
+standalone, since synthesis shares some of it. The comparator and the bitwise
+unit contribute nothing to that delta: they are not duplicated, only fed a
+sign-extended or masked low half (see
+[`../docs/architecture.md`](../docs/architecture.md#4-posit_alu--the-opcode-map)).
+
+The earlier figures in this section were for a Posit<16,2>-only design at
+36,631 um²; that configuration no longer exists, and the numbers above replace
+it.
 
 ### It does not fit 660 x 210
 
-**`make pnr_simple` fails on this floorplan.** The numbers, from that run:
+**`make pnr_simple` fails on this floorplan.** The numbers, from that run —
+which predates the Posit<16,2> pair, so it is the *smaller* of the two designs
+failing. The width targets at the bottom of this section are the ones to redo
+once a run with both precisions exists; at 106,452 um² of cells they all move
+out:
 
 | | |
 | --- | --- |

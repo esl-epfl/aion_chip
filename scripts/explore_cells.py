@@ -839,12 +839,27 @@ def sweep(design: Design, args: argparse.Namespace) -> tuple[
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
+def _rank_key(args: argparse.Namespace):
+    """Order the grid by the route the caller actually intends to run.
+
+    `budget` is the strictly better selection but is only reachable through
+    --emit; `flow` is what `./flow.py 2 --set ...` will give you. Ranking by
+    one while running the other is how a row that loses on your route ends up
+    labelled "best".
+    """
+    if args.rank == "flow":
+        return lambda r: -r.flow_saved
+    return lambda r: -r.budget_saved
+
+
 def print_rows(rows: list[Row], design: Design, args: argparse.Namespace,
                top: int) -> None:
     merge = args.score == "merge"
-    ranked = sorted(rows, key=lambda r: -r.budget_saved)[:top]
+    ranked = sorted(rows, key=_rank_key(args))[:top]
+    route = ("budgeted selection" if args.rank == "budget"
+             else "flow's own selection")
     print(f"\nbest {len(ranked)} of {len(rows)} grid point(s), by the area the "
-          f"budgeted selection buys")
+          f"{route} buys")
     if merge:
         print("(--score merge: every saving below is placement sites step 5's "
               "synthesizer actually frees,\n larger of the two columns priced "
@@ -1150,6 +1165,11 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--max-stack-depth", type=int, default=4,
                    help="deepest series stack the synthesizer may build")
     w.add_argument("--cell-prefix", default="AION_")
+    w.add_argument("--rank", choices=("budget", "flow"), default="budget",
+                   help="which selection the grid is ordered by, and which row "
+                        "--emit writes. 'budget' is the better library but "
+                        "needs --emit to reach; 'flow' ranks by what "
+                        "`./flow.py 2 --set ...` alone will deliver.")
     w.add_argument("--top-rows", type=int, default=20)
     w.add_argument("--json", type=Path,
                    default=PROJECT_ROOT / "flow" / "explore" / "sweep.json")
@@ -1179,7 +1199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                         indent=2))
         print(f"\n[sweep] wrote {args.json}")
 
-    best = max(rows, key=lambda r: r.budget_saved)
+    best = min(rows, key=_rank_key(args))
     if best.budget_saved <= 0:
         print("\nno grid point produced a usable selection")
         return 1
@@ -1193,11 +1213,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{best.budget_merging} of {best.budget_cells} cell(s) shed "
               f"transistors; {best.budget_devices} device(s) leave the netlist "
               f"across {best.budget_sites} site(s)")
-    print(f"\n  {recommend(best)}")
+    # Two numbers, two routes, and only one of them is a knob setting. Saying
+    # "run this" under the budget headline is how a reader ends up measuring
+    # the flow figure and calling the script wrong: `./flow.py 2 --set ...`
+    # reproduces `flow um2`, never `budget um2`, because the flow covers the
+    # netlist with every mined type and cuts to ELITE_COUNT afterwards, while
+    # the budgeted cover picks the cells first. No --set expresses that.
+    print(f"\n  the {best.flow_saved:,.1f} um2 line, which is what the knobs "
+          f"can reach:")
+    print(f"    {recommend(best)}")
+
+    if best.budget_saved > best.flow_saved * 1.005:
+        gain = (best.budget_saved / best.flow_saved - 1) if best.flow_saved else 0.0
+        print(f"\n  the {best.budget_saved:,.1f} um2 headline is {gain:.0%} more "
+              f"and no knob reaches it: it picks the")
+        print(f"  {best.budget_cells} cell(s) first and covers with only those, "
+              f"where the flow covers with all")
+        print(f"  {best.cover_types:,} type(s) its cover found and cuts to "
+              f"ELITE_COUNT afterwards -- so the")
+        print(f"  sites of the cells that lose the cut stay PDK cells. Re-run "
+              f"with --emit to write")
+        print(f"  it as a drop-in step-2 directory; the recipe prints below.")
+
     if best.min_size > 2:
-        print(f"  ...but this row keeps only patterns of {best.min_size} cell(s) "
-              f"or more, which no flow knob expresses. Use --emit and point "
-              f"step 3 at the library it writes.")
+        print(f"\n  this row also keeps only patterns of {best.min_size} cell(s) "
+              f"or more, which no flow knob expresses at all.")
+
+    if args.emit is None and best.budget_saved > best.flow_saved * 1.005:
+        print(f"\n  --emit was not given, so nothing was written.")
 
     if args.emit is not None:
         args.emit.mkdir(parents=True, exist_ok=True)

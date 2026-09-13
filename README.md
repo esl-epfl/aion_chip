@@ -191,7 +191,7 @@ baseline. `EXTRA_LIBS` would *not* do this: LibreLane reads those with
 The die is a plain **660 × 210 µm** box, hardened as a macro for a parent to
 instantiate rather than as a TinyTapeout tile — and, since the move to
 Posit<32,2>, **too small for the design**: see
-[`implementation/README.md`](implementation/README.md#what-the-posit322-alu-costs).
+[`implementation/README.md`](implementation/README.md#what-the-alu-costs).
 The TT *rules* are still
 honoured — the `tt_um_*` port list, `VPWR`/`VGND`, and the layer restrictions
 that keep the GDS submittable — but not TT's floorplan. See
@@ -236,7 +236,7 @@ for the posit reference model (see above).
 | **Chip Name**             | AION                                         |
 | **Module Name**           | `tt_um_aion`                                 |
 | **Process / Platform**    | IHP SG13G2 130 nm SiGe BiCMOS (Tiny Tapeout) |
-| **Arithmetic**            | Posit<32,2>                                  |
+| **Arithmetic**            | Posit<32,2> and Posit<16,2>                  |
 | **Die**                   | 660 µm × 210 µm (hardened as a macro)        |
 | **Reference Clock Input** | 1 MHz – 20 MHz (`clk`, 50 ns signoff period) |
 
@@ -244,15 +244,38 @@ for the posit reference model (see above).
 
 ## The arithmetic
 
-AION computes on **Posit<32,2>**. One `PositAdder` and one `PositMult`,
-FloPoCo-generated and one pipeline stage deep, plus a comparator and a bitwise
-unit — no MAC array, no lanes, no accumulator.
+AION computes on **Posit<32,2> or Posit<16,2>**, chosen per command by bit 4 of
+the control register. Four FloPoCo-generated units — `PositAdder` / `PositMult`
+at 32 bits (one pipeline stage deep) and `PositAdder16` / `PositMult16` at 16
+(purely combinational) — plus one comparator and one bitwise unit shared
+between the two widths. No MAC array, no lanes, no accumulator.
 
-Doubling the word width from Posit<16,2> is what sizes the die: the multiplier
-went from 19,781 µm² to 61,864 µm² and the adder from 8,850 µm² to 21,663 µm²,
-so the whole design is now 89,140 µm² over 7,744 cells. That does not fit the
-660 × 210 box — see
-[`implementation/README.md`](implementation/README.md#what-the-posit322-alu-costs).
+The width is not a generic and not a mode the ALU latches: both pairs are built
+and both run on every command, and `control[4]` picks which answer reaches
+`result`. So a narrow command costs no extra cycle — the same one-edge
+handshake serves both — and the two widths can alternate freely.
+
+Compare and bitwise are one 32-bit unit each, not two, because a narrow operand
+can be extended into them: the comparator is fed the low half **sign-extended**
+(posits order as signed integers, so `0xFFFF` has to stay below zero) and the
+bitwise unit the low half **zero-masked** (bits 31:16 of the operand registers
+still hold the last wide command's operands).
+
+| Unit | Standard-cell area |
+| --- | ---: |
+| `PositMult` | 61,774 µm² |
+| `PositAdder` | 21,558 µm² |
+| `PositMult16` | 16,684 µm² |
+| `PositAdder16` | 9,204 µm² |
+
+Adding the narrow pair takes the whole design from 85,878 µm² over 7,633 cells
+to **106,452 µm² over 9,622 cells** — +24% area. It did not fit the 660 × 210
+box at Posit<32,2> alone and it fits less well now; see
+[`implementation/README.md`](implementation/README.md#what-the-alu-costs).
+
+(Areas from `yosys … stat -liberty sg13g2_stdcell_typ_1p20V_25C`, flattened,
+each unit synthesised alone; the whole-design figures from the same method on
+`tt_um_aion`.)
 
 ## Register Interface
 
@@ -274,7 +297,9 @@ The `tt_um_aion` wrapper exposes the AION posit arithmetic unit through a simple
 ### Register Map
 
 A Posit<32,2> operand is four bytes, so the map spans fourteen addresses
-instead of eight. Operands and results are little-endian.
+instead of eight. Operands and results are little-endian. The map is the same
+at both precisions: a Posit<16,2> operand goes in the low two bytes of the same
+registers and its result comes back from the low two bytes of `result`.
 
 | Address     | Name          | Access | Description                                |
 | ----------- | ------------- | ------ | ------------------------------------------ |
@@ -286,9 +311,14 @@ instead of eight. Operands and results are little-endian.
 | `0xE`–`0xF` | —             | R      | Unmapped, read `0x00`                      |
 
 - Opcode (`control[3:0]`): `0` add, `1` multiply, `2`–`3` compare,
-  `4`–`6` bitwise. Everything else drives a zero result.
-- `control[7]` fires the command; `control[6:4]` is unused (it was the MAC lane
-  select before the MAC array was removed).
+  `4`–`6` bitwise. Everything else drives a zero result. The opcode means the
+  same operation at either precision.
+- Precision (`control[4]`): `0` = Posit<32,2>, `1` = Posit<16,2>. It takes
+  effect with the command that carries it — it is not a mode that has to be set
+  up first. After a Posit<16,2> command `result[31:16]` reads `0x00`, never the
+  leftovers of a wide one.
+- `control[7]` fires the command; `control[6:5]` is unused (it was part of the
+  MAC lane select before the MAC array was removed).
 - `done` is a completion level, not a pulse: the write to `control` clears it
   and it rises one clock edge later, when the result is settled, then holds
   until the next command. Polling it late is safe; polling it immediately
@@ -348,6 +378,10 @@ uo_out  ---------------<      register value     >--------------
 
 1. Write operand A to `0x0`–`0x3`, low byte first.
 2. Write operand B to `0x4`–`0x7`, low byte first.
-3. Write `control` (`0x8`) with the desired opcode and `bit[7] = 1` to start.
+3. Write `control` (`0x8`) with the desired opcode, `bit[4]` for the precision
+   and `bit[7] = 1` to start.
 4. Poll `status` (`0xD`) until `done` is high.
-5. Read the result from `0x9`–`0xC`, low byte first.
+5. Read the result from `0x9`–`0xC`, low byte first (`0x9`–`0xA` at
+   Posit<16,2>).
+
+At Posit<16,2>, steps 1 and 2 write two bytes each instead of four.

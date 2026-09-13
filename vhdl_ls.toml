@@ -3,6 +3,8 @@
 aion_soc.files = [
   "src/rtl/add.vhd",
   "src/rtl/mult.vhd",
+  "src/rtl/add_16.vhd",
+  "src/rtl/mult_16.vhd",
   "src/rtl/posit_alu.vhd",
   "src/rtl/posit_bitwise.vhd",
   "src/rtl/posit_compare.vhd",

@@ -2,7 +2,8 @@
 --  SPDX-FileCopyrightText:    2026 Filippo Quadri
 --  SPDX-License-Identifier:   Apache-2.0 WITH SHL-2.1
 --  Created:                   2026-09-01
---  Description:               Posit ALU - add/multiply/compare/bitwise
+--  Description:               Posit ALU - add/multiply/compare/bitwise,
+--                             at Posit<32,2> or Posit<16,2>
 -- ================================================================
 
 library ieee;
@@ -12,20 +13,23 @@ library work;
 
 entity posit_alu is
   port (
-    clk    : in  std_logic;
-    rst_n  : in  std_logic;
-    opA    : in  std_logic_vector(31 downto 0);
-    opB    : in  std_logic_vector(31 downto 0);
-    opcode : in  std_logic_vector(3 downto 0);  -- see the table below
-    start  : in  std_logic;
-    result : out std_logic_vector(31 downto 0);
-    done   : out std_logic
+    clk       : in  std_logic;
+    rst_n     : in  std_logic;
+    opA       : in  std_logic_vector(31 downto 0);
+    opB       : in  std_logic_vector(31 downto 0);
+    opcode    : in  std_logic_vector(3 downto 0);  -- see the table below
+    precision : in  std_logic;                     -- see PREC_P32 / PREC_P16
+    start     : in  std_logic;
+    result    : out std_logic_vector(31 downto 0);
+    done      : out std_logic
   );
 end entity posit_alu;
 
 architecture arch of posit_alu is
 
-  -- The opcode map, in one place.
+  -- The opcode map, in one place. `precision` is orthogonal to it: every
+  -- opcode means the same operation at either width, which is why the width
+  -- is a separate bit rather than a second half of the opcode table.
   constant OP_ADD  : std_logic_vector(3 downto 0) := "0000";
   constant OP_MULT : std_logic_vector(3 downto 0) := "0001";
   constant OP_EQ   : std_logic_vector(3 downto 0) := "0010";
@@ -33,6 +37,12 @@ architecture arch of posit_alu is
   constant OP_AND  : std_logic_vector(3 downto 0) := "0100";
   constant OP_OR   : std_logic_vector(3 downto 0) := "0101";
   constant OP_XOR  : std_logic_vector(3 downto 0) := "0110";
+
+  -- Operand width. At PREC_P16 only bits 15:0 of `opA`/`opB` are a number;
+  -- the upper half of the operand registers is whatever the last Posit<32,2>
+  -- command left there, and every block below is fed accordingly.
+  constant PREC_P32 : std_logic := '0';
+  constant PREC_P16 : std_logic := '1';
 
   component PositAdder is
     port (
@@ -51,6 +61,24 @@ architecture arch of posit_alu is
       R   : out std_logic_vector(31 downto 0)
     );
   end component PositMult;
+
+  component PositAdder16 is
+    port (
+      clk : in  std_logic;
+      X   : in  std_logic_vector(15 downto 0);
+      Y   : in  std_logic_vector(15 downto 0);
+      R   : out std_logic_vector(15 downto 0)
+    );
+  end component PositAdder16;
+
+  component PositMult16 is
+    port (
+      clk : in  std_logic;
+      X   : in  std_logic_vector(15 downto 0);
+      Y   : in  std_logic_vector(15 downto 0);
+      R   : out std_logic_vector(15 downto 0)
+    );
+  end component PositMult16;
 
   component posit_compare is
     port (
@@ -80,15 +108,32 @@ architecture arch of posit_alu is
   -- the arithmetic (normalizer, encoder) and the result multiplexer, which
   -- needs the rest of that cycle. So the answer is stable one edge later.
   --
-  -- `posit_compare` and `posit_bitwise` are wholly combinational and settle
-  -- sooner; the same edge covers them. Re-pipelining either FloPoCo unit means
-  -- raising this to match.
+  -- `PositAdder16`, `PositMult16`, `posit_compare` and `posit_bitwise` are
+  -- wholly combinational and settle sooner; the same edge covers them. The
+  -- narrow pair therefore costs no extra latency and none is charged for it:
+  -- one handshake serves both widths. Re-pipelining any FloPoCo unit means
+  -- raising this to match the deepest one.
   constant ALU_LATENCY : positive := 1;
 
-  signal add_result : std_logic_vector(31 downto 0);
-  signal mul_result : std_logic_vector(31 downto 0);
-  signal cmp_result : std_logic_vector(31 downto 0);
-  signal bit_result : std_logic_vector(31 downto 0);
+  signal add_result   : std_logic_vector(31 downto 0);
+  signal mul_result   : std_logic_vector(31 downto 0);
+  signal add16_result : std_logic_vector(15 downto 0);
+  signal mul16_result : std_logic_vector(15 downto 0);
+  signal cmp_result   : std_logic_vector(31 downto 0);
+  signal bit_result   : std_logic_vector(31 downto 0);
+
+  -- Add and multiply after the width multiplexer, in result-register shape.
+  signal add_sel : std_logic_vector(31 downto 0);
+  signal mul_sel : std_logic_vector(31 downto 0);
+
+  -- Operands as the compare and bitwise units need to see them; see below.
+  signal cmp_opA : std_logic_vector(31 downto 0);
+  signal cmp_opB : std_logic_vector(31 downto 0);
+  signal bit_opA : std_logic_vector(31 downto 0);
+  signal bit_opB : std_logic_vector(31 downto 0);
+
+  signal opA_sign16 : std_logic_vector(15 downto 0);
+  signal opB_sign16 : std_logic_vector(15 downto 0);
 
   signal busy    : std_logic;
   signal elapsed : natural range 0 to ALU_LATENCY;
@@ -96,7 +141,7 @@ architecture arch of posit_alu is
 begin
 
   -- The Posit<32,2> adder and multiplier are one pipeline stage deep, unlike
-  -- the Posit<16,2> pair they replace: FloPoCo puts a register in the adder's
+  -- the Posit<16,2> pair beside them: FloPoCo puts a register in the adder's
   -- normalizer and in the multiplier's encoder. They are fed straight from the
   -- operand registers and run unconditionally, so that stage fills on the same
   -- edge that latches `control` -- one edge before `done` -- and the delay is
@@ -117,25 +162,76 @@ begin
       R   => mul_result
     );
 
+  -- The Posit<16,2> pair. Both widths compute on every command and the answer
+  -- is picked afterwards, exactly as add and multiply already were: gating one
+  -- pair off would buy no power at this size -- the operand registers hold
+  -- still between commands, so the idle pair does not toggle anyway -- and
+  -- would put an enable on the critical path of the one that is running.
+  add16_inst : component PositAdder16
+    port map (
+      clk => clk,
+      X   => opA(15 downto 0),
+      Y   => opB(15 downto 0),
+      R   => add16_result
+    );
+
+  mul16_inst : component PositMult16
+    port map (
+      clk => clk,
+      X   => opA(15 downto 0),
+      Y   => opB(15 downto 0),
+      R   => mul16_result
+    );
+
+  -- `posit_compare` and `posit_bitwise` stay 32 bits wide at both precisions;
+  -- what changes is what they are handed. Two different extensions, because
+  -- the two units want opposite things from the upper half.
+  --
+  -- Compare is a signed compare on the raw encoding, so a Posit<16,2> operand
+  -- has to be SIGN-extended: 0xFFFF is -minpos and must order below zero, and
+  -- zero-extending it would make it the largest value in the word instead.
+  -- Sign extension preserves the whole ordering, so one 32-bit comparator
+  -- answers for both widths and the narrow mode costs no second one.
+  opA_sign16 <= (others => opA(15));
+  opB_sign16 <= (others => opB(15));
+
+  cmp_opA <= opA_sign16 & opA(15 downto 0) when precision = PREC_P16 else opA;
+  cmp_opB <= opB_sign16 & opB(15 downto 0) when precision = PREC_P16 else opB;
+
+  -- Bitwise wants the opposite: the upper half MASKED, not extended. Bits
+  -- 31:16 of the operand registers are stale -- the interface writes bytes and
+  -- nothing clears them when the precision changes -- so an unmasked AND in
+  -- Posit<16,2> mode would return whatever a previous Posit<32,2> command left
+  -- above bit 15. Masking first makes the answer the same shape as every other
+  -- Posit<16,2> result: the value in the low half, zeros above it.
+  bit_opA <= x"0000" & opA(15 downto 0) when precision = PREC_P16 else opA;
+  bit_opB <= x"0000" & opB(15 downto 0) when precision = PREC_P16 else opB;
+
   cmp_inst : component posit_compare
     port map (
-      x      => opA,
-      y      => opB,
+      x      => cmp_opA,
+      y      => cmp_opB,
       op     => opcode(0),
       result => cmp_result
     );
 
   bit_inst : component posit_bitwise
     port map (
-      x      => opA,
-      y      => opB,
+      x      => bit_opA,
+      y      => bit_opB,
       op     => opcode(1 downto 0),
       result => bit_result
     );
 
+  -- A Posit<16,2> answer occupies the low half of `result` and reads back as
+  -- zero above it, so software can read all four result bytes at either
+  -- precision and never be handed a stale byte it has to know to discard.
+  add_sel <= add_result when precision = PREC_P32 else x"0000" & add16_result;
+  mul_sel <= mul_result when precision = PREC_P32 else x"0000" & mul16_result;
+
   with opcode select
-    result <= add_result when OP_ADD,
-              mul_result when OP_MULT,
+    result <= add_sel    when OP_ADD,
+              mul_sel    when OP_MULT,
               cmp_result when OP_EQ | OP_LT,
               bit_result when OP_AND | OP_OR | OP_XOR,
               (others => '0') when others;
@@ -159,9 +255,9 @@ begin
       done    <= '0';
     elsif rising_edge(clk) then
       if start = '1' then
-        -- The edge that writes `control` in aion_interface. `opcode` becomes
-        -- the new command here, and the arithmetic's pipeline stage captures
-        -- the operand registers on this same edge.
+        -- The edge that writes `control` in aion_interface. `opcode` and
+        -- `precision` become the new command here, and the arithmetic's
+        -- pipeline stage captures the operand registers on this same edge.
         busy    <= '1';
         done    <= '0';
         elapsed <= ALU_LATENCY;
