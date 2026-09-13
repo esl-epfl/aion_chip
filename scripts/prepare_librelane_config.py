@@ -10,7 +10,9 @@
 import argparse
 import json
 import os
+import re
 import sys
+from decimal import Decimal
 
 from collect_cells import (collect_cells, collect_pdk_extension_cells,
                            EXTRA_KEY_BY_VIEW)
@@ -68,6 +70,26 @@ def make_relative(path: str, base: str) -> str:
 
     rel = os.path.relpath(abs_path, abs_base)
     return f"dir::{rel}"
+
+
+def def_die_area(path: str) -> list:
+    """The DIEAREA of a DEF file, in microns, as [x0, y0, x1, y1]."""
+    units = None
+    with open(path) as f:
+        for line in f:
+            match = re.match(r"\s*UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;", line)
+            if match:
+                units = int(match.group(1))
+                continue
+            match = re.match(
+                r"\s*DIEAREA\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)"
+                r"\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*;", line)
+            if match:
+                if units is None:
+                    break
+                return [Decimal(v) / units for v in match.groups()]
+    print(f"Error: no UNITS and DIEAREA statements in {path}", file=sys.stderr)
+    sys.exit(1)
 
 
 def strip_template_keys(obj):
@@ -402,6 +424,33 @@ def main():
     apply_overlay(config, modes.get(args.mode, {}), args.mode)
     if args.lenient:
         apply_overlay(config, modes.get("lenient", {}), "lenient")
+
+    # ------------------------------------------------------------------
+    # Die area against the DEF template
+    #
+    # The template fixes the pins and DIE_AREA fixes the die, and nothing
+    # downstream holds the two together: Odb.ApplyDEFTemplate only warns when
+    # they differ, then places the pins at the template's coordinates on
+    # whatever die it was given. TinyTapeout's precheck compares both the
+    # LEF's SIZE and every pin rectangle against the template, so a mismatch
+    # is a run that cannot be submitted -- refused here rather than found
+    # after PnR. Checked after the overlays, so no mode can slip past it.
+    # ------------------------------------------------------------------
+    if args.def_template is not None:
+        template_area = def_die_area(args.def_template)
+        die_area = config.get("DIE_AREA")
+        if die_area is None:
+            config["DIE_AREA"] = [float(v) for v in template_area]
+        elif [Decimal(str(v)) for v in die_area] != template_area:
+            print(
+                f"Error: DIE_AREA {die_area} is not the die of "
+                f"{args.def_template} ({[float(v) for v in template_area]}).\n"
+                "       The template's pins only line up with its own die: set "
+                "DIE_AREA in the config template to the template's.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"  die area: {config['DIE_AREA']} (the DEF template's)")
 
     if args.mode == "synth":
         config["meta"]["flow"] = VHDL_SYNTH_ONLY_FLOW

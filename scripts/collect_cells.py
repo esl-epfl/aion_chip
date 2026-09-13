@@ -55,61 +55,37 @@ SITE_WIDTH = 0.48
 SITE_HEIGHT = 3.78
 GEOMETRY_TOLERANCE = 1e-6
 
-# Routing tracks, from libs.tech/librelane/sg13g2_stdcell/tracks.info:
-# every Metal has X lines at n * 0.48 um and Y lines at n * 0.42 um.
-TRACK_PITCH = {"x": 0.48, "y": 0.42}
-TRACK_OFFSET = {"x": 0.0, "y": 0.0}
+# Routing layers, from sg13g2_tech.lef. A port has to have geometry on one of
+# them for a wire to reach it at all.
+ROUTING_LAYERS = ("Metal1", "Metal2", "Metal3", "Metal4", "Metal5")
 
-# Routing layer -> the axis whose track lines a pin on it must cover, from
-# DIRECTION in sg13g2_tech.lef. A wire runs along its layer's preferred
-# direction, so it stops anywhere on that axis but is pinned to a track on the
-# other: a HORIZONTAL layer routes along y = n * 0.42, a VERTICAL one along
-# x = n * 0.48. A pin covering no such line has nothing for a wire to land on.
-ROUTING_AXIS = {
-    "Metal1": "y",      # HORIZONTAL
-    "Metal2": "x",      # VERTICAL
-    "Metal3": "y",      # HORIZONTAL
-    "Metal4": "x",      # VERTICAL
-    "Metal5": "y",      # HORIZONTAL
-}
-TRACK_TOLERANCE = 5e-4
-
-# Via landing pads, from the DEFAULT via definitions in sg13g2_tech.lef. Every
-# ViaN (N = 1..4) is a 0.19 um cut enclosed by 0.29 x 0.21 um on the metal
-# below and 0.29 x 0.20 um on the metal above, in either orientation. Covering
-# a track is not enough on its own: a port with nowhere to put that pad has
-# nowhere to put the via that brings the wire down to it, which is DRT-0073
-# just the same.
-#
-# The long side of the pad runs along the wire and may hang off the end of the
-# port onto the rest of the net -- sg13g2_nand4_1/A relies on exactly that, its
-# widest port rect being 0.275 um against a 0.29 um pad. The short side may
-# not, so 0.21 um across is the real floor.
-# Each entry is (axis of the long side, pad below w, h, pad above w, h).
-VIA_LANDING = (
-    ("x", 0.29, 0.21, 0.29, 0.20),
-    ("y", 0.21, 0.29, 0.20, 0.29),
+# The two metal shapes of every DEFAULT ViaN (N = 1..4) in sg13g2_tech.lef, as
+# ((enclosure on the metal below w, h), (pad on the metal above w, h)) in um:
+# ViaN_XX, _XY, _YX and _YY. The _s variants and Via1_s only have bigger pads,
+# so they reach no port these four cannot.
+VIA_SHAPES = (
+    ((0.29, 0.21), (0.29, 0.20)),
+    ((0.29, 0.21), (0.20, 0.29)),
+    ((0.21, 0.29), (0.29, 0.20)),
+    ((0.21, 0.29), (0.20, 0.29)),
 )
-VIA_LANDING_SHORT_SIDE = 0.21
 
-# Metal2 spacing, from the SPACINGTABLE in sg13g2_tech.lef: 0.21 um for any
-# shape under 0.39 um wide, which a via landing and a routed wire both are.
-#
-# It applies to the pad *above* the via, and it is the rule that decides
-# whether a pin is reachable at all. The router works down from RT_MIN_LAYER,
-# which is Metal2 in this design (implementation/config.json) -- it never
-# routes on Metal1 -- so every pin is entered through a Via1, and a via whose
-# Metal2 pad cannot keep 0.21 um from the cell's own Metal2 is a via that
-# cannot be placed. A pin with none is not "hard to reach", it is unreachable,
-# and detailed routing aborts on it with DRT-0073.
-#
-# Checked against the shipped library: all 283 signal pins of sg13g2_stdcell
-# pass, and so do the mined AION cells. The two that do not are
-# AION_mux2i_1/I2 and AION_mux2i_2/I2 -- exactly the pins TritonRoute names.
-METAL2_SPACING = 0.21
+# The smallest entry of each routing metal's SPACINGTABLE in sg13g2_tech.lef.
+# The smallest, so that a pin this rejects is one TritonRoute cannot reach --
+# never one it merely might not.
+METAL_SPACING = {
+    "Metal1": 0.18,
+    "Metal2": 0.21,
+    "Metal3": 0.21,
+    "Metal4": 0.21,
+    "Metal5": 0.21,
+}
 
-# The layer a via off a port lands on, so that the macro's own obstructions
-# there can be checked for covering it.
+# MANUFACTURINGGRID. Every via half-size above is a multiple of it, so a via
+# centre off this grid would put the via's own edges off it.
+MANUFACTURING_GRID = 0.005
+
+# The layer a via off a port lands on.
 LAYER_ABOVE = {
     "Metal1": "Metal2",
     "Metal2": "Metal3",
@@ -121,11 +97,8 @@ LAYER_ABOVE = {
 # downgrade these: DRT-0073 is a hard abort inside TritonRoute's pin access,
 # not a checker LibreLane can be told to ignore.
 UNROUTABLE_MARKERS = (
-    "covers no routing track",
     "no geometry on a routing layer",
-    "no via can land on it",
-    "every via landing is covered",
-    "no Via1 can be placed on it",
+    "has no via access",
 )
 
 
@@ -254,13 +227,6 @@ USE_RE = re.compile(r"^\s*USE\s+(\S+)\s*;", re.MULTILINE)
 OBS_BLOCK_RE = re.compile(r"^[ \t]*OBS[ \t]*$(.*?)^[ \t]*END[ \t]*$", re.MULTILINE | re.DOTALL)
 
 
-def covers_track(lo: float, hi: float, axis: str) -> bool:
-    """True when the span [lo, hi] contains a routing track line on axis."""
-    offset, pitch = TRACK_OFFSET[axis], TRACK_PITCH[axis]
-    n = math.ceil((lo - offset) / pitch - TRACK_TOLERANCE / pitch)
-    return offset + n * pitch <= hi + TRACK_TOLERANCE
-
-
 def layer_rects(block: str):
     """Every RECT in a PORT or OBS block, as (layer, x1, y1, x2, y2)."""
     layer = None
@@ -276,196 +242,163 @@ def layer_rects(block: str):
         yield layer, min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
 
 
-def region_covered(box, blockers) -> bool:
-    """True when every point of the closed rectangle box lies in some blocker.
+def grid_points(lo: float, hi: float) -> range:
+    """Indices of the manufacturing-grid points strictly inside (lo, hi)."""
+    return range(math.floor(lo / MANUFACTURING_GRID + 1e-6) + 1,
+                 math.ceil(hi / MANUFACTURING_GRID - 1e-6))
 
-    Coordinate compression: the box is cut at every blocker edge that falls
-    inside it, and one point per resulting cell decides that whole cell. box
-    can be degenerate -- a port rect that a landing pad fits exactly leaves a
-    line or a single point to place the via centre on.
+
+def free_grid_point(lo: float, hi: float, spans):
+    """The lowest grid point in (lo, hi) outside every open span, or None.
+
+    A point exactly on the end of a span is outside it: that is a via at
+    exactly the minimum spacing, which is legal.
     """
-    x1, y1, x2, y2 = box
-    xs = sorted({x1, x2} | {min(max(v, x1), x2) for b in blockers for v in (b[0], b[2])})
-    ys = sorted({y1, y2} | {min(max(v, y1), y2) for b in blockers for v in (b[1], b[3])})
-    at_x = [(xs[i] + xs[i + 1]) / 2 for i in range(len(xs) - 1)] or [x1]
-    at_y = [(ys[i] + ys[i + 1]) / 2 for i in range(len(ys) - 1)] or [y1]
-    return all(
-        any(b[0] <= px <= b[2] and b[1] <= py <= b[3] for b in blockers)
-        for px in at_x
-        for py in at_y
-    )
-
-
-def centre_span(lo: float, hi: float, pad: float, may_spill: bool):
-    """Where a pad of this size may be centred within [lo, hi], or None.
-
-    A pad that does not fit still lands when it is the long side that runs
-    over, because it runs over onto the rest of the net -- but only as far as
-    the short side, past which there is no port left to sit on.
-    """
-    if hi - lo >= pad - GEOMETRY_TOLERANCE:
-        return lo + pad / 2, hi - pad / 2
-    if may_spill and hi - lo >= VIA_LANDING_SHORT_SIDE - GEOMETRY_TOLERANCE:
-        centre = (lo + hi) / 2
-        return centre, centre
+    points = grid_points(lo, hi)
+    k = points.start
+    while k < points.stop:
+        at = k * MANUFACTURING_GRID
+        covering = [end for start, end in spans if start + 1e-6 < at < end - 1e-6]
+        if not covering:
+            return at
+        k = max(k + 1, math.ceil(max(covering) / MANUFACTURING_GRID - 1e-6))
     return None
 
 
-def check_via_landing(rect, obstructions, spacing: float = METAL2_SPACING) -> str:
-    """Whether a via can land on one port rect: 'ok', 'nofit' or 'blocked'.
+def via_fits(port, others, below: bool = True, above: bool = True) -> bool:
+    """Whether some ViaN can connect to one port rect with its metal clear.
 
-    'nofit' -- the rect is under 0.21um across, so no via can be placed on it
-    however well it sits on the grid. 'blocked' -- a pad fits, but the shapes
-    on the layer above leave nowhere for the via centre to sit. That second one
-    is what `magic lef write -pinonly` produces when a cell routes its output
-    up to Metal2 and only labels the Metal1 end: the strap the pin needs is
-    exported as an obstruction sitting on the pin.
+    `port` is (layer, x1, y1, x2, y2) and `others` every shape of every *other*
+    net in the macro -- its OBS and the other pins. The via's enclosure has to
+    overlap the port, and nothing more: it may hang off the port onto free
+    metal. What neither of its metal shapes may do is come within its layer's
+    spacing of another net, measured corner to corner the way spacing is.
 
-    `obstructions` is every shape of every *other* net -- the OBS block and the
-    other pins both -- because a pad that shorts to another pin is as unusable
-    as one that shorts to an obstruction.
+    That overhang is the whole difference from the rule this replaced, which
+    wanted the via inside the port. TritonRoute does not: on AION_mux2_0/I0 it
+    put a Via1_YY 60 nm left of the port, cut overlapping it by 35 nm, pad
+    0.265 um from the cell's Metal2 strap, and routed all 126 instances clean --
+    while that rule refused to publish the cell.
 
-    Each of those keeps `spacing` as well as its own extent: the pad above the
-    via is a Metal2 shape like any other, and Metal2 that ends 0.20 um from a
-    neighbouring net is not a legal place to put it. That margin is the whole
-    check on a tightly routed cell -- AION_mux2i_1/I2 has two gate pads with
-    room for a via and the cell's own Metal2 risers 0.015 um to one side of
-    each, so the pads are wide enough and the pin is still unreachable.
+    Positions are searched over the manufacturing grid, and every legal one
+    counts, including ones TritonRoute never tries (it tries tracks, half
+    tracks, the pin centre and positions aligning the enclosure with the pin).
+    So a pin this passes can still fail pin access when the only room is a few
+    nanometres wide; a pin this rejects, TritonRoute cannot reach.
+
+    below=False or above=False ignores the other nets on that metal, which is
+    how a caller finds out which of the two closes the door.
     """
-    layer, x1, y1, x2, y2 = rect
-    if layer not in LAYER_ABOVE:          # topmost routing layer, nothing above
-        return "ok"
-    above = [b for b in obstructions if b[0] == LAYER_ABOVE[layer]]
-    fits = False
-    for long_axis, below_w, below_h, above_w, above_h in VIA_LANDING:
-        span_x = centre_span(x1, x2, below_w, long_axis == "x")
-        span_y = centre_span(y1, y2, below_h, long_axis == "y")
-        if span_x is None or span_y is None:
-            continue
-        fits = True
-        # Where the via centre may sit for the pad below to stay on the port,
-        # against where it may not for the pad above to clear a neighbour.
-        centres = (span_x[0], span_y[0], span_x[1], span_y[1])
-        pad_x, pad_y = above_w / 2 + spacing, above_h / 2 + spacing
-        blocked = [
-            (bx1 - pad_x, by1 - pad_y, bx2 + pad_x, by2 + pad_y)
-            for _, bx1, by1, bx2, by2 in above
-        ]
-        if not region_covered(centres, blocked):
-            return "ok"
-    return "blocked" if fits else "nofit"
+    layer, x1, y1, x2, y2 = port
+    upper = LAYER_ABOVE.get(layer)
+    if upper is None:                     # topmost routing layer, nothing above
+        return True
+    for (below_w, below_h), (above_w, above_h) in VIA_SHAPES:
+        # Via centres at which the enclosure overlaps the port.
+        box = (x1 - below_w / 2, y1 - below_h / 2, x2 + below_w / 2, y2 + below_h / 2)
+        # Each shape of another net, grown by the via shape that has to clear
+        # it, so that the question is how close the via *centre* may come.
+        grown = []
+        for other, ox1, oy1, ox2, oy2 in others:
+            if other == layer and below:
+                half_w, half_h, space = below_w / 2, below_h / 2, METAL_SPACING[layer]
+            elif other == upper and above:
+                half_w, half_h, space = above_w / 2, above_h / 2, METAL_SPACING[upper]
+            else:
+                continue
+            grown.append((ox1 - half_w, oy1 - half_h, ox2 + half_w, oy2 + half_h, space))
+        for kx in grid_points(box[0], box[2]):
+            cx = kx * MANUFACTURING_GRID
+            spans = []
+            for gx1, gy1, gx2, gy2, space in grown:
+                dx = max(gx1 - cx, cx - gx2, 0.0)
+                if dx < space - 1e-6:
+                    reach = math.sqrt(space * space - dx * dx)
+                    spans.append((gy1 - reach, gy2 + reach))
+            if free_grid_point(box[1], box[3], spans) is not None:
+                return True
+    return False
+
+
+def no_via_access(macro: str, pin: str, ports, others) -> str:
+    """Why no via reaches any port of `pin`, and what would make room."""
+    layer = min((port[0] for port in ports), key=ROUTING_LAYERS.index)
+    upper = LAYER_ABOVE[layer]
+    lowest = [port for port in ports if port[0] == layer]
+    space, upper_space = METAL_SPACING[layer], METAL_SPACING[upper]
+    if not any(via_fits(port, others, below=False) for port in lowest):
+        why = (f"every place for the via's {upper} pad is within {upper_space} um "
+               f"of another net's {upper} -- OBS or another pin; metal written to "
+               "OBS counts as another net even when it is this pin's own")
+        fix = (f"move that {upper} {upper_space} um clear of where a via can sit, "
+               f"or declare the port on {upper} where the metal already is")
+    elif not any(via_fits(port, others, above=False) for port in lowest):
+        why = (f"the via's {layer} enclosure cannot overlap the port without "
+               f"coming within {space} um of another net's {layer}")
+        fix = f"leave {layer} free beside the port for the enclosure to hang onto"
+    else:
+        why = (f"the positions whose {upper} pad clears the other nets put the "
+               f"{layer} enclosure within {space} um of another net's {layer}, "
+               "and the other way around")
+        fix = f"make room on one side of the port, on {layer} and {upper} both"
+    return (f"{macro}: PIN {pin} has no via access: no ViaN can overlap the port "
+            f"with its {layer} enclosure and keep both of its metal shapes clear "
+            f"of every other net -- {why}. Detailed routing aborts with 'DRT-0073 "
+            f"No access point'; {fix}")
 
 
 def check_pin_access(macro: str, body: str) -> List[str]:
-    """Every signal pin must give the router somewhere to land.
+    """Every signal pin must give the router a way in.
 
-    Three things have to hold, and a drawn-by-hand abstract gets each of them
-    wrong in a different way:
+    Two things have to hold:
 
       * the port has geometry on a routing layer at all;
-      * it covers a track line, so a wire can run onto it;
-      * a via can land on it -- the port is at least one landing pad wide, and
-        the shapes of every other net on the layer above leave somewhere for
-        the pad to sit, with Metal2 spacing.
+      * some via can overlap one of its routing-layer rects with both of its
+        metal shapes clear of every other net (see via_fits).
 
-    That third one is not a nicety. RT_MIN_LAYER is Metal2 in this design, so
-    the router never puts a wire on Metal1: every pin is entered through a
-    Via1, and a pin on which no Via1 can be placed is unreachable however well
-    it sits on the grid. It is also the failure that does not look like one --
-    the abstract is legal, the cell places, and detailed routing aborts an
-    hour later with DRT-0073.
+    Covering a track and being 0.21 um across are *not* required, and this used
+    to require both. TritonRoute pin access (OpenROAD 26Q3) reaches Metal1 ports
+    10 and 40 nm off the track grid, a 0.18 um port, and AION_mux2_0's I0/I1/I3
+    whenever the via has room to hang off the port. It finds no access point for
+    AION_mux2i_1/I2 and AION_mux2i_2/I2, a port boxed in by other nets' Metal1,
+    or a port with an obstruction strap across it -- and this rejects exactly
+    those. aion_layout's metrics.lef_pin_access applies the same rule to the
+    same LEF inside the drawing loop; the two must stay in step, or the loop
+    converges on cells that are then refused here.
 
     This is the static half of TritonRoute's pin access: necessary, not
-    sufficient, because it cannot see the neighbouring instances. It is worth
-    a second here because DRT-0073 is a hard abort, not a DRC that LENIENT=1
-    can downgrade. All 283 signal pins of the PDK sg13g2_stdcell library pass
-    all three, and so do the mined AION cells (the tightest is sg13g2_inv_1/Y
-    at 0.23um, against the 0.21um landing pad).
+    sufficient, because it cannot see the neighbouring instances or the
+    router's own choice of positions. It is worth a second here because
+    DRT-0073 is a hard abort, not a DRC that LENIENT=1 can downgrade. Every
+    signal pin of the PDK sg13g2_stdcell library passes.
     """
     obs_block = OBS_BLOCK_RE.search(body)
     base = list(layer_rects(obs_block.group(1))) if obs_block else []
-
-    # Every pin's shapes, so each pin can be graded against the others. A pad
-    # that shorts to a neighbouring pin is as unusable as one that shorts to
-    # an obstruction, and in a cell that routes a net over its own pad band
-    # the neighbouring pin is what it hits first.
-    others = {}
-    for pin, pin_body in PIN_BLOCK_RE.findall(body):
-        others[pin] = list(layer_rects(pin_body))
+    pins = PIN_BLOCK_RE.findall(body)
+    # Every pin's shapes, so each is graded against the others: to the router a
+    # neighbouring pin is another net exactly as an obstruction is.
+    shapes = {pin: list(layer_rects(pin_body)) for pin, pin_body in pins}
 
     problems = []
-    for pin, pin_body in PIN_BLOCK_RE.findall(body):
+    for pin, pin_body in pins:
         use = USE_RE.search(pin_body)
         if use is not None and use.group(1).upper() in ("POWER", "GROUND"):
             continue
         if use is None and pin.upper() in ("VDD", "VSS"):
             continue
-        obstructions = base + [r for name, rects in others.items()
-                               if name != pin for r in rects]
 
-        layers = []
-        for line in pin_body.splitlines():
-            layer_match = LAYER_RE.match(line)
-            if layer_match is None:
-                continue
-            layer = layer_match.group(1)
-            if layer in ROUTING_AXIS and layer not in layers:
-                layers.append(layer)
-
-        if not layers:
+        ports = [rect for rect in shapes[pin] if rect[0] in ROUTING_LAYERS]
+        if not ports:
             problems.append(
                 f"{macro}: PIN {pin} has no geometry on a routing layer, "
                 "so the router cannot reach it"
             )
             continue
 
-        ports = [rect for rect in layer_rects(pin_body) if rect[0] in ROUTING_AXIS]
-
-        on_track = False
-        for layer, x1, y1, x2, y2 in ports:
-            axis = ROUTING_AXIS[layer]
-            lo, hi = (y1, y2) if axis == "y" else (x1, x2)
-            if covers_track(lo, hi, axis):
-                on_track = True
-                break
-
-        if not on_track:
-            where = ", ".join(
-                f"{lay} routes along {ROUTING_AXIS[lay]} = n * "
-                f"{TRACK_PITCH[ROUTING_AXIS[lay]]}um"
-                for lay in layers
-            )
-            problems.append(
-                f"{macro}: PIN {pin} covers no routing track ({where}). "
-                "Detailed routing aborts with 'DRT-0073 No access point'"
-            )
-            continue
-
-        landings = [check_via_landing(rect, obstructions) for rect in ports]
-        if "ok" in landings:
-            continue
-
-        if "blocked" in landings:
-            above = ", ".join(
-                dict.fromkeys(LAYER_ABOVE[lay] for lay in layers if lay in LAYER_ABOVE)
-            )
-            problems.append(
-                f"{macro}: PIN {pin} is wide enough for a via, but no Via1 can "
-                f"be placed on it: every position for the {above} pad either "
-                f"sits on another net's {above} or comes within "
-                f"{METAL2_SPACING}um of it. The router works down from "
-                "RT_MIN_LAYER=Metal2 and never routes on Metal1, so this pin "
-                "cannot be entered at all and detailed routing aborts with "
-                "'DRT-0073 No access point'. Widen the port, or move this "
-                f"cell's own {above} out from beside it"
-            )
-        else:
-            problems.append(
-                f"{macro}: PIN {pin} is under 0.21um in one direction, so "
-                "no via can land on it (the smallest ViaN pad is 0.29 x "
-                "0.21um). Covering a track is not enough on its own -- "
-                "detailed routing aborts with 'DRT-0073 No access point'"
-            )
+        others = base + [rect for name, rects in shapes.items()
+                         if name != pin for rect in rects]
+        if not any(via_fits(port, others) for port in ports):
+            problems.append(no_via_access(macro, pin, ports, others))
     return problems
 
 

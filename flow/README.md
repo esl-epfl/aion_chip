@@ -1,7 +1,8 @@
 # Flow output
 
-Everything the nine flow steps produce. One directory per step, numbered in
-the order they run, each wiped and rewritten in full by the step that owns it:
+Everything the ten flow steps produce. One directory per step, numbered in
+the order they run (`ls` sorts `10_` between `1_` and `2_`), each wiped and
+rewritten in full by the step that owns it:
 
 ```
 synth.core        \
@@ -23,6 +24,9 @@ logs/<step>/            one file per command the handler ran   (git-ignored)
 8_render/               PNGs of the die and its AION cells (git-ignored)
 9_report/               AION vs the baseline: report.md,   (git-ignored)
                         report.json and a standalone report.html
+10_tt_precheck/         the AION chip as TinyTapeout takes it: the GDS, LEF
+                        and netlist, TT's precheck reports and the verdict
+                                                         (git-ignored)
 pnr_simple/             the PDK-only baseline            (git-ignored)
                         not a step -- `make pnr_simple` builds it, and
                         step 9 is the only thing that reads it
@@ -88,6 +92,15 @@ metrics.*  the run's metrics, csv and json
 ```
 
 Both carry `sdf/`; only `7_pnr/` and `pnr_simple/` carry a placed database.
+
+Step 10 packages `7_pnr/` into `10_tt_precheck/`: `tt_um_aion.gds`, `.lef`
+and `.v` under the names TinyTapeout's `custom_gds` action takes, TT's precheck
+reports in `precheck/`, and `tt_precheck.json`, the verdict — signoff metrics,
+every precheck check, `submittable`. Re-running step 7 marks it `STALE`.
+
+`make tt_precheck` on its own does the same for `pnr_simple/`, into
+`pnr_simple/tt_submission/`, which is deleted with the rest of that directory
+the next time the baseline is hardened.
 
 Steps 2 to 6 are the AION-specific half:
 

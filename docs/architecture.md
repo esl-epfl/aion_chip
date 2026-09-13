@@ -15,7 +15,7 @@ for the AI-cell flow see [`../scripts/flow/README.md`](../scripts/flow/README.md
 ## 1. The whole chip
 
 ```
-                        tt_um_aion  (660 x 210 um)
+                  tt_um_aion  (854.40 x 313.74 um, TT 4x2 tile)
   ┌──────────────────────────────────────────────────────────────────────┐
   │                                                                      │
   │  clk ──┬───────────────────────────────────────────────────────┐     │
@@ -395,17 +395,17 @@ cycles at power-up; the testbench uses five.
 | | |
 | --- | --- |
 | Process | IHP SG13G2, 130 nm |
-| Die | 660 × 210 µm, hardened as a macro |
+| Die | 854.40 × 313.74 µm, a TinyTapeout 4x2 tile |
 | Clock | 50 ns signoff period (20 MHz) |
 | Routing ceiling | TopMetal1 |
 | Supplies | `VPWR` / `VGND` |
 | Cell area | 89,140 µm² over 7,744 instances (Posit&lt;32,2&gt; only) |
 
-The design is hardened to be instantiated in a parent, not as a TinyTapeout
-tile, but it keeps every TT *rule*: the `tt_um_*` port list including `ena`, the
-supply names, `RT_MAX_LAYER: TopMetal1`, and `PDN_MULTILAYER: false` — which
-keeps the power grid off TopMetal2, a layer TT's precheck forbids in a project
-GDS. See [`../implementation/README.md`](../implementation/README.md).
+The design is hardened as the TinyTapeout tile itself: TT's template DEF puts
+the 43 pins on Metal4 along the north edge, the power grid is vertical
+TopMetal1 stripes only, and nothing is routed above TopMetal1 — TT's precheck
+forbids TopMetal2 in a project GDS. `make tt_precheck` runs that precheck. See
+[`../implementation/README.md`](../implementation/README.md#tinytapeout-the-chip-is-the-tile).
 
 Every number in this section is from the last hardening run, which was made
 before the Posit&lt;16,2&gt; pair was added; that pair takes the cell area to

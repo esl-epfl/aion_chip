@@ -64,6 +64,7 @@ halfway through a step.
 | 7 | `7_pnr` | harden the netlist with those cells, then simulate with SDF | ~10 min |
 | 8 | `8_render` | draw the hardened die and mark where the AION cells landed | ~1 s |
 | 9 | `9_report` | compare the chip against the PDK-only baseline | ~1 s + baseline |
+| 10 | `10_tt_precheck` | package the chip as TinyTapeout's `custom_gds` takes it, check its signoff metrics and run TT's precheck on it | ~2 min |
 
 Every step reads only what it declares, writes only under its own directory
 (step 6 also publishes into `implementation/cells/`), and never assumes an
@@ -88,6 +89,7 @@ flow/
   8_render/           <TOP>.chip.png  <TOP>.aion.png  <TOP>.<CELL>.png
                       render.json
   9_report/           report.md  report.json  report.html
+  10_tt_precheck/     <TOP>.gds  <TOP>.lef  <TOP>.v  precheck/  tt_precheck.json
   pnr_simple/         the PDK-only control step 9 measures against
   pnr_simple/         the PDK-only baseline (make pnr_simple, not a step)
 ```
@@ -318,6 +320,46 @@ the page:
 ```bash
 python scripts/report_html.py flow/9_report/report.json -o /tmp/report.html
 ```
+
+## Step 10, whether TinyTapeout would take it
+
+Nine steps build the chip and measure it; none of them says whether it can be
+submitted. TinyTapeout takes a GDS it did not build through its `custom_gds`
+action, which routes nothing and hands the files straight to the precheck —
+so the chip has to pass that precheck as it is. Step 10 runs `make tt_precheck`
+on `flow/7_pnr` and keeps the result in `flow/10_tt_precheck/`:
+
+```
+10_tt_precheck/
+  tt_um_aion.gds  tt_um_aion.lef  tt_um_aion.v   the three files custom_gds takes
+  precheck/                                      TT's own reports (results.md, DRC XMLs)
+  tt_precheck.json                               the verdict
+```
+
+Two gates, and both have to pass:
+
+1. **The run's signoff**, read back from `flow/7_pnr/metrics.json`: Magic,
+   KLayout and routing DRC, illegal overlaps, the Magic/KLayout XOR, LVS, the
+   power grid, critical disconnected pins, setup and hold violations, max slew
+   and max cap — each must be reported and zero. TT's precheck runs no LVS and
+   no STA, and LibreLane's checkers stop none of these in a `LENIENT` run, so
+   without this gate a `--lenient` chip with a short in it would pass. Antenna
+   violations are printed but do not fail the step; neither LibreLane nor TT
+   stops on them.
+2. **TT's precheck**, TT's code (tt-support-tools, pinned by `TT_TOOLS_VERSION`
+   in the Makefile) on the three packaged files: the PDK's KLayout deck with
+   the recommended rules LibreLane skips, the die and every pin against the
+   tile's template DEF, the TopMetal1 power stripes, forbidden and unknown
+   layers, the prBoundary, cell names, zero-area shapes, the netlist in Yosys.
+
+It runs in the container and takes about two minutes. The deck is the
+container's PDK, not the IHP-Open-PDK commit TT's action pins, so the run on
+GitHub after submission is still the one that counts. Copying the package into
+the submission repository is in
+[`implementation/README.md`](../../implementation/README.md#submitting).
+
+The PDK-only baseline is not the chip the flow builds, so step 10 does not
+look at it; `make tt_precheck` on its own checks `flow/pnr_simple` instead.
 
 ## The PDK extension, and the two files it costs every later step
 
@@ -550,6 +592,8 @@ flow.py           entry point
 scripts/render_chip.py   the die renderer step 8 calls (also a CLI)
 scripts/compare_runs.py  the run comparison step 9 calls (also a CLI)
 scripts/report_html.py   the same comparison as a page (also a CLI)
+scripts/tt_precheck.py   the TinyTapeout package + signoff + precheck step 10 runs
+                         (`make tt_precheck`)
 scripts/gds_to_image.py  the single-cell renderer step 6 calls
 ```
 
@@ -577,6 +621,14 @@ modules.
 agent is not running at all. Read
 `flow/logs/6_layout_drawing/<CELL>.agent.*.log`; it is usually a quota or
 credentials problem, not a layout problem.
+
+**Step 6 fails a cell with "not published: ..."** — the layout verified but its
+views did not reach `implementation/cells/`, and since the netlist instantiates
+the cell, step 7 could not start either. The reason follows the colon. "The LEF
+would fail PnR" is a pin-access finding: `make verify` grades the same LEF with
+the same rule, so the drawing loop reports it too — redraw, don't work around
+it. "The exporter refused it" is usually the netlist's function disagreeing
+with the Liberty.
 
 **Step 7 refuses with "cells that have no published views"** — the netlist
 instantiates cells step 6 has not drawn yet. Finish step 6, or re-run step 3

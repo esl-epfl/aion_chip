@@ -33,7 +33,7 @@ scripts/            flow helpers driven by the Makefile
 
 ## Flow
 
-The chip is built by a nine-step flow. `./flow.py` runs it; everything it
+The chip is built by a ten-step flow. `./flow.py` runs it; everything it
 produces lands in `flow/`.
 
 ```bash
@@ -56,6 +56,7 @@ produces lands in `flow/`.
 | 7 | `7_pnr` | harden the netlist with those cells, then simulate with SDF delays |
 | 8 | `8_render` | draw the hardened die and mark where the AION cells landed |
 | 9 | `9_report` | compare the chip against the PDK-only baseline — Markdown, JSON and a standalone HTML page |
+| 10 | `10_tt_precheck` | package the chip as TinyTapeout's `custom_gds` takes it, check its DRC/LVS/timing signoff and run **TT's own precheck** on it |
 
 Every step is runnable and re-runnable on its own, and `flow/coherence.json`
 records what ran when so a re-run of an early step shows up as `STALE`
@@ -170,6 +171,7 @@ testbench asks for.
 | `make synth`       | VHDL via FuseSoC            | `flow/1_synth/`          |
 | `make pnr`         | `NETLIST=` + `CELLS_DIR=`   | `flow/7_pnr/`            |
 | `make pnr_simple`  | VHDL via FuseSoC            | `flow/pnr_simple/`       |
+| `make tt_precheck` | a hardened run (`TT_RUN_DIR=`) | `<run>/tt_submission/` |
 | `make pdk_ext_lib` | `implementation/pdk_extension/` | `flow/pdk_extension/lib/` |
 | `make logo`        | `logo/*.png`                | `implementation/macros/` |
 
@@ -188,15 +190,14 @@ baseline. `EXTRA_LIBS` would *not* do this: LibreLane reads those with
 `-setattr blackbox`, which hides the cell from the mapper. See
 [`implementation/pdk_extension/README.md`](implementation/pdk_extension/README.md).
 
-The die is a plain **660 × 210 µm** box, hardened as a macro for a parent to
-instantiate rather than as a TinyTapeout tile — and, since the move to
-Posit<32,2>, **too small for the design**: see
-[`implementation/README.md`](implementation/README.md#what-the-alu-costs).
-The TT *rules* are still
-honoured — the `tt_um_*` port list, `VPWR`/`VGND`, and the layer restrictions
-that keep the GDS submittable — but not TT's floorplan. See
-[`implementation/README.md`](implementation/README.md), which says which is
-which and why.
+Both PnR targets harden the chip as a **TinyTapeout 4x2 tile** — 854.40 ×
+313.74 µm, TT's DEF template for the pins, TT's TopMetal1 power stripes, nothing
+on TopMetal2 — so the GDS they write is the submission itself.
+`make tt_precheck` packages a run the way TT's `custom_gds` action takes it,
+checks its signoff and runs TT's own precheck on it; flow step 10 does the same
+for the AION chip. TT routes nothing for a custom GDS, which is why
+there is no smaller macro to connect: see
+[`implementation/README.md`](implementation/README.md#tinytapeout-the-chip-is-the-tile).
 
 `make logo` belongs to no step either: it rasterises the chip's logo onto
 **TopMetal1 (126/0)** inside a **prBoundary (189/4)** and writes a GDS and a LEF.
@@ -237,7 +238,7 @@ for the posit reference model (see above).
 | **Module Name**           | `tt_um_aion`                                 |
 | **Process / Platform**    | IHP SG13G2 130 nm SiGe BiCMOS (Tiny Tapeout) |
 | **Arithmetic**            | Posit<32,2> and Posit<16,2>                  |
-| **Die**                   | 660 µm × 210 µm (hardened as a macro)        |
+| **Die**                   | 854.40 µm × 313.74 µm (TinyTapeout 4x2 tile) |
 | **Reference Clock Input** | 1 MHz – 20 MHz (`clk`, 50 ns signoff period) |
 
 ---
@@ -269,9 +270,10 @@ still hold the last wide command's operands).
 | `PositAdder16` | 9,204 µm² |
 
 Adding the narrow pair takes the whole design from 85,878 µm² over 7,633 cells
-to **106,452 µm² over 9,622 cells** — +24% area. It did not fit the 660 × 210
-box at Posit<32,2> alone and it fits less well now; see
-[`implementation/README.md`](implementation/README.md#what-the-alu-costs).
+to **106,452 µm² over 9,622 cells** — +24% area. It did not fit the old 660 ×
+210 box at Posit<32,2> alone; on the 4x2 tile both precisions place at 48%
+utilisation and close timing in every corner; see
+[`implementation/README.md`](implementation/README.md#on-the-4x2-tile).
 
 (Areas from `yosys … stat -liberty sg13g2_stdcell_typ_1p20V_25C`, flattened,
 each unit synthesised alone; the whole-design figures from the same method on

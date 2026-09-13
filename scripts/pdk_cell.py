@@ -5,7 +5,7 @@
 #  Description:               Build one hand-designed PDK-extension cell:
 #                             characterize, draw, characterize again.
 #
-#  The nine-step flow mines its cells out of a netlist.  This does not: a
+#  The ten-step flow mines its cells out of a netlist.  This does not: a
 #  PDK-extension cell is *designed*, by hand, because the PDK's own
 #  implementation of that function is not the best one available.  The
 #  transmission-gate mux2 is the case in point -- IHP builds mux2 the only

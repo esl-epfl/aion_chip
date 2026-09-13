@@ -75,6 +75,7 @@ STEP_DIRS = {
     "7_pnr": FLOW_DIR / "7_pnr",
     "8_render": FLOW_DIR / "8_render",
     "9_report": FLOW_DIR / "9_report",
+    "10_tt_precheck": FLOW_DIR / "10_tt_precheck",
 }
 
 COHERENCE_FILE = FLOW_DIR / "coherence.json"

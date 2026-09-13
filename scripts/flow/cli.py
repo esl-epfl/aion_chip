@@ -42,6 +42,7 @@ steps
   7  7_pnr                 place and route + post-PnR simulation
   8  8_render              draw the die and mark the AION cells
   9  9_report              compare the chip against the PDK-only baseline
+  10 10_tt_precheck        package the chip for TinyTapeout, check it is submittable
 
 examples
   python flow.py                          the whole chain
@@ -137,7 +138,7 @@ def print_list() -> int:
     title(" aion flow ")
     for step in steps.STEPS:
         number = step.key.split("_", 1)[0]
-        print(f"  {color(number, Style.CYAN, Style.BOLD)}  "
+        print(f"  {color(number.rjust(2), Style.CYAN, Style.BOLD)}  "
               f"{color(step.key, Style.BOLD):<34} {step.summary}")
         if step.upstream:
             note(f"    after: {', '.join(step.upstream)}")

@@ -43,7 +43,7 @@ endif
 
 .PHONY: all sim post_synth_sim post_synth_sim_ai post_pnr_sim post_pnr_sim_ai sim_all setup format \
         clean clean-impl clean-flow clean-all waves synth pnr pnr_simple librelane \
-        openroad klayout logo pdk_ext_lib _save_run _setup_cocotb_env _require_sdf _check_sim_results \
+        openroad klayout logo pdk_ext_lib tt_precheck _save_run _setup_cocotb_env _require_sdf _check_sim_results \
         flow flow-status flow-list universal universal-update
 
 all: sim
@@ -213,7 +213,7 @@ clean-impl:  ## Remove the LibreLane run directories (hours of work — be sure)
 	rm -rf $(IMPL_BUILD_DIRS)
 
 clean-flow:  ## Remove every flow step's output under flow/ (keeps the .core files)
-	rm -rf $(FLOW_DIR)/[1-9]_* $(FLOW_DIR)/pnr_simple $(FLOW_DIR)/logs \
+	rm -rf $(FLOW_DIR)/[1-9]_* $(FLOW_DIR)/[1-9][0-9]_* $(FLOW_DIR)/pnr_simple $(FLOW_DIR)/logs \
 	       $(FLOW_DIR)/coherence.json
 	@# flow/synth and flow/pnr are where `make synth` and `make pnr` wrote
 	@# before the step directories were numbered. A tree that predates that
@@ -255,14 +255,16 @@ LIBRELANE_CONFIG_SRC  = $(IMPL_DIR)/config.json
 LIBRELANE_SDC         = $(IMPL_DIR)/constraints/aion.sdc
 LIBRELANE_PIN_ORDER   = $(IMPL_DIR)/pin_order.cfg
 
-# Pin placement. Empty by default, so pin_order.cfg spreads the pins over all
-# four sides -- what a macro instantiated in a parent needs. Setting
-# LIBRELANE_DEF_TEMPLATE (e.g. to $(IMPL_DIR)/def/tt_block_$(TT_TILES)_pgvdd.def)
-# switches to TinyTapeout's floorplan instead, which pins all 43 pins to the
-# north edge for the multiplexer; prepare_librelane_config.py then ignores
-# --pin-order. DIE_AREA in implementation/config.json has to match.
+# Pin placement: TinyTapeout's DEF template for the tile, which pins all 43
+# pins to Metal4 on the north edge, where the multiplexer connects. The chip is
+# hardened as the tile itself -- TT's custom_gds submission routes nothing, and
+# its precheck wants these exact pin rectangles on this exact die -- so both
+# PnR targets use it. DIE_AREA in implementation/config.json has to be the
+# template's die, and prepare_librelane_config.py refuses a run where it is
+# not. `LIBRELANE_DEF_TEMPLATE=` (empty) falls back to pin_order.cfg, for a
+# free-standing macro that TT will not accept.
 TT_TILES             ?= 4x2
-LIBRELANE_DEF_TEMPLATE ?=
+LIBRELANE_DEF_TEMPLATE ?= $(IMPL_DIR)/def/tt_block_$(TT_TILES)_pgvdd.def
 LIBRELANE_FLOORPLAN    = $(if $(LIBRELANE_DEF_TEMPLATE),\
                              --def-template $(LIBRELANE_DEF_TEMPLATE),\
                              --pin-order $(LIBRELANE_PIN_ORDER))
@@ -533,10 +535,75 @@ logo: ## Draw the logo as a GDS + LEF macro -> implementation/macros/
 		--strict $(LOGO_ARGS)
 
 # ==============================================================================
+# TinyTapeout submission
+#
+#   make tt_precheck                          flow/pnr_simple
+#   ./flow.py 10                              the AION chip (flow/7_pnr)
+#
+# A design hardened outside TT's CI goes in through tt-gds-action/custom_gds,
+# which takes a GDS, a LEF and a gate-level netlist as they are and runs the
+# precheck on them -- it routes nothing. This packages a saved run under the
+# names custom_gds expects, into TT_OUT_DIR, and checks the package can be
+# submitted: the run's own signoff metrics first (DRC, LVS, XOR, timing --
+# nothing TT's precheck looks at, and nothing LibreLane stops a LENIENT=1 run
+# on), then TT's own precheck: DRC with the PDK's KLayout deck (recommended
+# rules included, unlike LibreLane's), the pins and die against the template
+# DEF, the TopMetal1 power stripes, forbidden and unknown layers, the
+# prBoundary. Flow step 10 is this target on flow/7_pnr, packaged into
+# flow/10_tt_precheck/.
+#
+# tt-support-tools is fetched pinned, precheck/ and tech/ only, the same way as
+# Universal below. TT_TOOLS_VERSION is the commit to check against; the DRC
+# deck is the container's PDK, not the one TT's action pins.
+# ==============================================================================
+TT_TOOLS_REPO    ?= https://github.com/TinyTapeout/tt-support-tools.git
+TT_TOOLS_VERSION ?= 01d5d2814fa9dd61e9d211e0b235a4a592a9316a
+TT_TOOLS_DIR     ?= $(BUILD_DIR)/tt-support-tools
+TT_TOOLS_STAMP    = $(TT_TOOLS_DIR)/.fetched-$(TT_TOOLS_VERSION)
+TT_RUN_DIR       ?= $(PNR_SIMPLE_OUT_DIR)
+TT_OUT_DIR       ?= $(TT_RUN_DIR)/tt_submission
+
+# The container sees the project at another path, so both directories go in
+# relative to the project root, which is also the directory it starts in.
+TT_RUN_REL        = $(patsubst $(PROJECT_ROOT)/%,%,$(abspath $(TT_RUN_DIR)))
+TT_OUT_REL        = $(patsubst $(PROJECT_ROOT)/%,%,$(abspath $(TT_OUT_DIR)))
+
+tt_precheck: $(TT_TOOLS_STAMP) ## Package a run for TinyTapeout, check its signoff and run TT's precheck (TT_RUN_DIR=, TT_OUT_DIR=)
+	@for dir in "$(abspath $(TT_RUN_DIR))" "$(abspath $(TT_OUT_DIR))"; do \
+		case "$$dir" in \
+			$(PROJECT_ROOT)/?*) ;; \
+			*) echo "Error: $$dir is outside $(PROJECT_ROOT)/, which the container cannot see"; exit 1 ;; \
+		esac; \
+	done
+	@HOST_PWD=$(PROJECT_ROOT) $(PROJECT_ROOT)/scripts/docker_run.sh python3 scripts/tt_precheck.py \
+		$(TT_RUN_REL) \
+		--out $(TT_OUT_REL) \
+		--top $(TOPLEVEL) \
+		--tiles $(TT_TILES) \
+		--tt-tools $(TT_TOOLS_DIR) \
+		--work $(BUILD_DIR)/tt_precheck/$(subst /,_,$(TT_OUT_REL))
+
+$(TT_TOOLS_STAMP):
+	@echo "Fetching tt-support-tools $(TT_TOOLS_VERSION) (precheck/ and tech/ only)"
+	@rm -rf $(TT_TOOLS_DIR)
+	@mkdir -p $(TT_TOOLS_DIR)
+	@cd $(TT_TOOLS_DIR) && \
+		git init -q . && \
+		git remote add origin $(TT_TOOLS_REPO) && \
+		git sparse-checkout init --cone >/dev/null && \
+		git sparse-checkout set precheck tech >/dev/null && \
+		git -c protocol.version=2 fetch --depth 1 --filter=blob:none \
+			origin $(TT_TOOLS_VERSION) >/dev/null 2>&1 && \
+		git checkout -q FETCH_HEAD
+	@test -f $(TT_TOOLS_DIR)/precheck/precheck.py || { echo "Error: precheck.py missing after fetch"; exit 1; }
+	@touch $@
+
+# ==============================================================================
 # AION flow handler
 #
-# The nine-step chain that turns the RTL into a chip built from AI-generated
-# standard cells. Each step is runnable on its own and writes under flow/;
+# The ten-step chain that turns the RTL into a chip built from AI-generated
+# standard cells, and checks it can go to TinyTapeout. Each step is runnable
+# on its own and writes under flow/;
 # flow/coherence.json records what ran when, so a re-run of an early step
 # shows up as STALE downstream instead of quietly producing a chip that mixes
 # results from two different inputs.

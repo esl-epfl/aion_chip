@@ -345,13 +345,21 @@ class LayoutDrawingStep(Step):
             return CellOutcome(cell, "drawn", verdict="RESULT: PASS",
                                compare=compare, detail="withheld on loss")
 
-        published = self._publish(ctx, cell, final)
+        refusal = self._publish(ctx, cell, final)
         pex_ok = None
         if cfg.LAYOUT_VERIFY_PEX:
             pex_ok = self._verify_pex(ctx, cell, build, cells_v)
 
+        if refusal is not None:
+            # Drawn, verified and characterized, and still not in
+            # implementation/cells/. The netlist instantiates this cell, so
+            # step 7 would refuse to start -- which makes it this step's
+            # failure to report, not a note in passing and a green step.
+            return CellOutcome(cell, "failed", verdict="RESULT: PASS",
+                               compare=compare, pex_verified=pex_ok,
+                               detail=f"not published: {refusal}")
         return CellOutcome(cell, "drawn", verdict="RESULT: PASS",
-                           compare=compare, published=published,
+                           compare=compare, published=True,
                            pex_verified=pex_ok)
 
     # -----------------------------------------------------------------
@@ -509,8 +517,10 @@ class LayoutDrawingStep(Step):
                                if not turn.ok else "")
 
     # -----------------------------------------------------------------
-    def _publish(self, ctx: Context, cell: str, final: Path) -> bool:
+    def _publish(self, ctx: Context, cell: str, final: Path) -> Optional[str]:
         """Copy the exported views into implementation/cells/<CELL>/.
+
+        Returns None once the cell is published, or why it was not.
 
         `make pnr` discovers cells by walking that directory and grouping by
         file STEM, so one stray recognised file is a phantom cell with
@@ -519,40 +529,43 @@ class LayoutDrawingStep(Step):
         """
         if not final.is_dir():
             warn(f"{cell}: nothing exported to {paths.rel_to_project(final)}")
-            return False
+            return f"nothing exported to {paths.rel_to_project(final)}"
 
         rejected = sorted(final.glob("*.rejected"))
         if rejected:
-            fail(f"{cell}: the exporter REFUSED to publish — "
-                 + ", ".join(p.name for p in rejected))
+            names = ", ".join(p.name for p in rejected)
+            fail(f"{cell}: the exporter REFUSED to publish — {names}")
             note("that is a real finding about the cell (usually the Verilog "
                  "function solved from the netlist disagreeing with the "
                  "Liberty), not something to work around")
-            return False
+            return f"the exporter refused it ({names})"
 
         views = {p.suffix.lower(): p for p in final.iterdir() if p.is_file()}
         missing = [ext for ext in REQUIRED_VIEWS if ext not in views]
         if missing:
             fail(f"{cell}: cannot publish, missing {', '.join(missing)}")
-            return False
+            return f"missing {', '.join(missing)}"
 
         libs = sorted(final.glob("*.lib"))
         if len(libs) > 1:
             fail(f"{cell}: {len(libs)} Liberty files exported. `make pnr` "
                  "groups views by file stem, so per-corner libs become "
                  "phantom cells. Re-run with LAYOUT_CORNERS=typ.")
-            return False
+            return f"{len(libs)} Liberty files exported; use LAYOUT_CORNERS=typ"
 
-        # The exporter grades the abstract too, and a cell that fails there
-        # arrives as a .rejected above. This re-grades it on the host, because
-        # publishing is the last moment a bad abstract is cheap: past here it
-        # survives placement and kills detailed routing an hour into step 7.
+        # The exporter grades the abstract with the same rules, and so does the
+        # verify that ended the drawing loop, so a refusal here means the two
+        # copies of those rules -- this script's and aion_layout's -- have
+        # drifted apart. It is re-graded anyway, because publishing is the last
+        # moment a bad abstract is cheap: past here it survives placement and
+        # kills detailed routing an hour into step 7.
         problems = check_lef(str(views[".lef"]))
         if problems:
             fail(f"{cell}: cannot publish, the LEF would fail PnR")
             for problem in problems:
                 note(f"  {problem}")
-            return False
+            ctx.note(f"{cell} not published: {problems[0]}")
+            return f"the LEF would fail PnR: {problems[0]}"
 
         target = paths.CELLS_DIR / cell
         if target.exists():
@@ -577,7 +590,7 @@ class LayoutDrawingStep(Step):
             note(f"  {png.name} — layout, footprint and layer legend")
 
         ctx.note(f"{cell} published to implementation/cells/{cell}/")
-        return True
+        return None
 
     # -----------------------------------------------------------------
     def _render(self, cell: str, gds: Path, target: Path) -> Optional[Path]:
@@ -753,13 +766,16 @@ targets:
                 bits.append("pex ok")
             elif outcome.pex_verified is False:
                 bits.append("pex FAILED")
+            if outcome.state == "failed" and outcome.detail:
+                bits.append(f"— {_clip(outcome.detail)}")
             note(f"  {outcome.cell:<34} {'  '.join(bits)}")
             ctx.note(f"{outcome.cell}: {'  '.join(bits)}")
 
         if broken:
             raise StepFailed(
                 f"{len(broken)} cell(s) failed: "
-                + ", ".join(o.cell for o in broken), 1)
+                + "; ".join(f"{o.cell} ({_clip(o.detail)})" if o.detail else o.cell
+                            for o in broken), 1)
         if waiting:
             warn(f"{len(waiting)} cell(s) still need a layout. Step 7 will "
                  "REFUSE to run until they are published, because the netlist "
@@ -768,6 +784,11 @@ targets:
         if not published:
             raise StepFailed("no cell was published; step 7 has nothing to place", 1)
         return "ok"
+
+
+def _clip(text: str, limit: int = 160) -> str:
+    """One summary line's worth of a failure reason."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _cell_of(netlist: Path) -> str:

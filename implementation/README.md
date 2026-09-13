@@ -12,32 +12,113 @@ cells/                   AI-generated standard cells (see cells/README.md)
 macros/                  the logo macro, drawn by `make logo` (see below)
 ```
 
-## What is kept from TinyTapeout
+## TinyTapeout: the chip is the tile
 
-The floorplan is **not** TT's any more. This design is hardened to be
-instantiated twice in a top level that lives in another repository, so TT's
-tile `DIE_AREA` and its DEF template — which pins all 43 pins to the north edge
-for the multiplexer — would both be the wrong shape. `DIE_AREA` is a plain
-**660 x 210 um** box and pin placement falls back to `pin_order.cfg`, which
-spreads the pins over all four sides.
+`make pnr_simple` and `make pnr` both harden `tt_um_aion` as a **4x2
+ihp-sg13g2 TinyTapeout tile** — 854.40 x 313.74 um, TT's pins, TT's power
+stripes — and that GDS is the submission, unchanged.
 
-What is kept is everything that is a *rule* rather than a floorplan, because
-the macro still has to be submittable:
+It is the tile and not a smaller macro because of how TT takes a design it did
+not build. A project hardened outside TT's CI goes in through
+`tt-gds-action/custom_gds`, which copies a GDS, a LEF and a gate-level netlist
+into `tt_submission/` and runs the precheck on them. Nothing on TT's side
+places, routes or connects anything, and the precheck compares the LEF's die
+and every pin rectangle against the tile's template DEF: a macro smaller than
+the tile fails on its size before a single pin is looked at. Routing a smaller
+macro out to the tile's pins would mean hardening a wrapper here as well — a
+second LibreLane run, a PDN that reaches into the macro, hierarchical LVS and
+STA — to arrive at the same tile with less core in it.
 
-| Rule | Setting | Why |
+What TT's precheck (`tt-support-tools/precheck/precheck.py`) checks, and what
+makes a run here pass it:
+
+| Precheck | Requirement | Set by |
 | --- | --- | --- |
-| Port list | `clk`, `ena`, `rst_n`, `ui_in[8]`, `uio_in[8]`, `uio_oe[8]`, `uio_out[8]`, `uo_out[8]` | `check_ports()` rejects a `tt_um_*` module missing any of them |
-| Supply names | `VDD_PIN` `VPWR`, `GND_PIN` `VGND` | what the harness declares |
-| Routing ceiling | `RT_MAX_LAYER: TopMetal1` | `IHPTech.project_top_metal_layer` |
-| PDN off TopMetal2 | `PDN_MULTILAYER: false` | `PDN_HORIZONTAL_LAYER` defaults to TopMetal2, and TT's precheck lists `TopMetal2.drawing` in `forbidden_layers` — a project GDS carrying any is rejected |
+| Pin check, boundary check | die exactly 854.40 x 313.74 um; a top-level `prBoundary.boundary` (189/4) rectangle that size; nothing outside it | `DIE_AREA` in `config.json`, which `prepare_librelane_config.py` refuses to let differ from the template's `DIEAREA` |
+| Pin check | all 43 signal pins, one Metal4 rectangle each, exactly the template's | `FP_DEF_TEMPLATE` — the Makefile's `LIBRELANE_DEF_TEMPLATE`, `def/tt_block_$(TT_TILES)_pgvdd.def` |
+| Pin check | `VPWR` and `VGND` LEF pins on TopMetal1 only, each stripe >= 2.1 um wide and within 10 um of the top and bottom edges | `PDN_MULTILAYER: false`; the one-row `TOP_`/`BOTTOM_MARGIN_MULT`, since the stripes end with the core; `MAGIC_WRITE_LEF_PINONLY`, which keeps rails and vias out of the ports |
+| KLayout checks | no TopMetal2 drawing, pin or label; the top cell is `tt_um_aion` | `PDN_MULTILAYER: false` and `RT_MAX_LAYER: TopMetal1` — both default to TopMetal2 for this PDK |
+| KLayout SG13G2 DRC | the PDK's own deck, **recommended rules included** | LibreLane's Magic and KLayout DRC gate the run, but its KLayout pass sets `no_recommended`; only `make tt_precheck` and flow step 10 run the deck the way TT does |
+| Layer, cell name, zero-area checks | only layers on TT's list, no `#` or `/` in a cell name, no zero-area shape | PDK cells and LibreLane's stream-out |
+| Verilog syntax check | the netlist reads in Yosys | `nl/tt_um_aion.nl.v` |
 
-`ena` is high whenever the tile is selected and powered; AION gates nothing on
-it, so `tt_um_aion.vhd` reads it into a signal called `unused`.
+Two TT rules are not precheck items but hold anyway: the port list
+(`clk`, `ena`, `rst_n`, `ui_in[8]`, `uio_in[8]`, `uio_oe[8]`, `uio_out[8]`,
+`uo_out[8]` — `Odb.ApplyDEFTemplate` stops the run on any pin the template and
+the design do not share) and the
+supply names `VPWR`/`VGND`. `ena` is high whenever the tile is selected and
+powered; AION gates nothing on it, so `tt_um_aion.vhd` reads it into a signal
+called `unused`.
 
-`implementation/def/tt_block_4x2_pgvdd.def` is kept in case the TT floorplan is
-wanted again: set `LIBRELANE_DEF_TEMPLATE` to it and change `DIE_AREA` to that
-tile's row of TT's `tile_sizes.yaml` — the two have to agree, and nothing checks
-it for you.
+The rest of `config.json` is this design's own — the 50 ns clock, the 45%
+placement density, `GRT_ALLOW_CONGESTION` off, the KLayout DRC and XOR TT's
+CI skips to save minutes. None of those is anything the precheck looks at;
+the keys in the table are, and `make tt_precheck` is how to find out whether a
+change to one still passes.
+
+`pin_order.cfg` is only read when `LIBRELANE_DEF_TEMPLATE` is set empty, for a
+free-standing macro. TT will not accept that GDS.
+
+### Submitting
+
+```bash
+./flow.py 7..10                            # the AION chip   -> flow/10_tt_precheck/
+make pnr_simple && make tt_precheck        # the PDK-only chip -> flow/pnr_simple/tt_submission/
+```
+
+Flow step 10 and `make tt_precheck` are the same check. Each copies a saved
+run's `gds/`, `lef/` and `nl/` views as `tt_um_aion.gds`, `tt_um_aion.lef` and
+`tt_um_aion.v` — the three files `custom_gds` takes — and then passes them
+through two gates:
+
+1. **the run's signoff**, from its `metrics.json`: Magic, KLayout and routing
+   DRC, overlaps, XOR, LVS, power grid, critical disconnected pins, setup,
+   hold, slew and cap all reported and zero — the things TT's precheck never
+   looks at;
+2. **TT's precheck**, in the container, with `tt-support-tools` fetched at
+   `TT_TOOLS_VERSION` (Makefile).
+
+TT's reports land in `precheck/` next to the three files, and
+`tt_precheck.json` holds the verdict. Step 10 keeps the AION chip's package in
+its own directory, and re-running step 7 marks it `STALE`; the baseline's sits
+inside `flow/pnr_simple/`, and the next `make pnr_simple` wipes it along with
+the GDS it came from.
+
+The submission repository commits those three files, an `info.yaml` with
+`tiles: "4x2"` and `top_module: "tt_um_aion"`, and a GDS workflow that swaps
+TT's hardening action for `custom_gds`, tagged for the shuttle as TT's template
+is. The `precheck` job downloads the same `tt_submission` artifact either
+way. The `gl_test` job reads `PDK_SOURCE` and `PDK_VERSION` from
+`tt_submission/pdk.json`, and the `pdk.json` custom_gds writes carries only
+`PDK` — check that job against the shuttle's template before counting on it.
+
+```yaml
+- uses: TinyTapeout/tt-gds-action/custom_gds@<shuttle tag>
+  with:
+    pdk: ihp-sg13g2
+    top_module: tt_um_aion
+    gds_path: gds/tt_um_aion.gds
+    lef_path: lef/tt_um_aion.lef
+    verilog_path: verilog/tt_um_aion.v
+```
+
+Three things to know before trusting a local pass:
+
+* **The DRC deck is the container's PDK**, not the IHP-Open-PDK commit TT's
+  precheck action pins. A rule the two versions disagree on is only settled by
+  TT's own run.
+* **TT's GL test only knows PDK cells.** It compiles `test/` against
+  `sg13g2_stdcell.v` and the netlist. `flow/pnr_simple` needs nothing more;
+  the `flow/7_pnr` netlist instantiates AION and PDK-extension cells, so the
+  submission's `test/Makefile` has to add their Verilog models.
+* **A clean baseline says little about the AION chip.** Step 6 checks each
+  cell on its own; step 10 checks the tile, where the cells abut PDK cells and
+  each other, with the recommended rules LibreLane's KLayout pass leaves out.
+  A cell that is clean in step 6 can still fail there.
+
+A `LENIENT=1` run is one whose checkers were told not to stop, so nothing in
+LibreLane vouches for it. The signoff gate reads its metrics back anyway: it
+passes only if the run came out clean regardless.
 
 ## What the ALU costs
 
@@ -77,7 +158,28 @@ The earlier figures in this section were for a Posit<16,2>-only design at
 36,631 um²; that configuration no longer exists, and the numbers above replace
 it.
 
+### On the 4x2 tile
+
+Both precisions fit the tile. `make pnr_simple`, 2026-09-13, PDK cells only:
+
+| | |
+| --- | --- |
+| Core area (81 rows x 1768 sites) | 259,837 um² |
+| Utilisation at global placement | 48.2% (`PL_TARGET_DENSITY_PCT` 45 is raised to 0.49, with `GPL-0302`) |
+| Standard-cell area after PnR | 152,293 um² — 58.6% |
+| … of which antenna diodes | 30,569 um², 5,616 `sg13g2_antennanp` from `RUN_HEURISTIC_DIODE_INSERTION` |
+| Setup / hold worst slack | +9.46 ns (`nom_slow_1p08V_125C`) / +0.175 ns (`nom_fast_1p32V_m40C`) |
+| Detailed-routing DRC, antenna violations | 0 / 0 |
+| Magic DRC, KLayout DRC, LVS, XOR | 0 / 0 / 0 / 0 |
+| `make tt_precheck` | 10 of 10 checks pass, 2 min |
+| LibreLane run time | 17 min 40 s |
+
+The diodes are a fifth of the placed cell area: without them the cells take
+46.8% of the core.
+
 ### It does not fit 660 x 210
+
+The record of why the design left its earlier box, kept for the numbers.
 
 **`make pnr_simple` fails on this floorplan.** The numbers, from that run —
 which predates the Posit<16,2> pair, so it is the *smaller* of the two designs
@@ -120,6 +222,7 @@ instead is equally valid; it has to come in whole 3.78 um rows.
 | `make synth`      | VHDL via FuseSoC                    | `flow/1_synth/` — netlist + pre-PnR STA |
 | `make pnr`        | `NETLIST=` + `CELLS_DIR=`           | `flow/7_pnr/` — GDS                   |
 | `make pnr_simple` | VHDL via FuseSoC                    | `flow/pnr_simple/` — GDS, PDK cells only |
+| `make tt_precheck` | `TT_RUN_DIR=` (default `flow/pnr_simple`) | `<run>/tt_submission/` — the three files TT takes, and TT's precheck reports |
 
 Each of these hardens in `.build/<target>_aion/` and then copies the last run's
 views, metrics and reports into the directory in the table, which is the fixed
@@ -275,21 +378,21 @@ from the low coordinate of that edge to the high one. **The format has no
 comment syntax** — any stray line is parsed as a pin regex, and a line starting
 with `#` followed by N/E/W/S silently opens a new side.
 
-Current layout for the 660 x 210 um tile:
+**Nothing reads it by default.** The TT DEF template places the pins, and
+prepare_librelane_config.py drops `--pin-order` whenever a template is given.
+It is used only with `LIBRELANE_DEF_TEMPLATE=` (empty), for a free-standing
+macro that TT would not accept, and it was written for the old 660 x 210 um
+box:
 
 - **west** (210 um edge): `clk`, `rst_n`, kept away from the data buses
 - **north** (660 um edge): `ui_in`, `uio_in` — everything the tile consumes
 - **south** (660 um edge): `uo_out`, then `uio_out`/`uio_oe` interleaved per bit
   so a bidirectional pad sees output and enable next to each other
 
-This is our own floorplan constraint, not the official TinyTapeout harness
-pinout. When submitting to a TT shuttle, replace it with TT's DEF template:
-pass `--def-template` from the Makefile, which sets `FP_DEF_TEMPLATE` and
-overrides pin positions wholesale.
-
 ## Grid constraints
 
-`sg13g2_stdcell` places on `CoreSite`: 0.48 um wide, 3.78 um tall. `CORE_AREA`
-therefore starts at y = 11.34 (3 rows) and spans 189 um (50 rows); starting it
-anywhere else makes OpenROAD snap it and warn. `DIE_AREA` is 660 x 210 um, and
-660 is exactly 1375 site widths.
+`sg13g2_stdcell` places on `CoreSite`: 0.48 um wide, 3.78 um tall. The tile is
+854.40 x 313.74 um — 1780 sites by 83 rows — and there is no `CORE_AREA`: the
+margins (one row top and bottom, six sites left and right) put 81 rows of 1768
+sites at (2.88, 3.78), which is exactly where the template DEF's `ROW`
+statements have them.

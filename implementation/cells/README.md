@@ -44,16 +44,28 @@ because none of them fail until detailed placement otherwise:
 - height exactly `3.78` um (one `CoreSite` row)
 - width an exact multiple of `0.48` um (the `CoreSite` pitch)
 - `PIN VDD` and `PIN VSS` present, so the PDN can strap it
-- every signal pin covers a routing track — a `Metal1` port must contain a
-  `y = n * 0.42` um line, a `Metal2` port an `x = n * 0.48` um line
-  (`tracks.info`, and `DIRECTION` in `sg13g2_tech.lef`)
+- every signal pin can be entered by a via — some `ViaN` overlaps one of its
+  routing-layer port rectangles with its enclosure, and keeps both of its
+  metal shapes clear of every *other* net (the OBS and the other pins):
+  0.18 um on `Metal1`, 0.21 um on `Metal2`..`Metal5`
 
-That last one is the only one that survives placement. A pin off the track
-grid places and globally routes without complaint, then aborts the whole
-design in detailed routing with `DRT-0073 No access point` — a hard abort in
-pin access, which `LENIENT=1` does not downgrade. `scripts/collect_cells.py`
-grades it before PnR starts, and `make export` refuses to publish a cell that
-fails it. All 283 signal pins of the PDK `sg13g2_stdcell` library pass.
+That last one is the only one that survives placement. An unreachable pin
+places and globally routes without complaint, then aborts the whole design in
+detailed routing with `DRT-0073 No access point` — a hard abort in pin access,
+which `LENIENT=1` does not downgrade. `scripts/collect_cells.py` grades it
+before PnR starts; step 6 grades the same LEF with the same rule, both in
+`make verify` and when it publishes.
+
+The via may hang off the port. That is what TritonRoute does when a port's own
+landing is crowded, so a port does **not** have to cross a routing track or be
+0.21 um across — both used to be required here, and both rejected cells the
+router reaches. Calibrated against OpenROAD's `pin_access` on the mined cells,
+the extension cells and deliberate mutations of them: `AION_mux2_0`'s I0/I1/I3
+(refused by the old rule, routed clean in PnR) pass; `AION_mux2i_1/I2` and
+`AION_mux2i_2/I2` (DRT-0073) fail. The rule is a necessary condition: a pin it
+passes can still miss when the only room is a few nanometres wide, because
+the router tries only certain positions. Every signal pin of the PDK
+`sg13g2_stdcell` library passes.
 
 ## Why the cells are *not* don't-touch
 

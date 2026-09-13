@@ -1,6 +1,6 @@
 # PDK extension cells
 
-Cells that are **designed**, not mined. The nine-step flow finds recurring
+Cells that are **designed**, not mined. The ten-step flow finds recurring
 subgraphs in a synthesized netlist and merges them; the cells here exist for
 the opposite reason — the PDK's own implementation of a function is not the
 best one available, and a hand design beats it.
