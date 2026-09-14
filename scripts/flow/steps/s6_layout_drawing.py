@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import traceback
@@ -39,13 +40,13 @@ from pathlib import Path
 from typing import Optional
 
 import cell_registry
-from collect_cells import check_lef
+from collect_cells import LIB_CORNERS, check_lef, published_lib_problem
 
 from .. import agent, paths
 from ..coherence import BLOCKED
 from ..config import Config
 from ..pex import PexError, write_wrapper
-from ..runner import terminate_all
+from ..runner import Result, terminate_all
 from ..style import Style, color, emit, fail, info, note, ok, prefixed, warn
 from .base import Context, Step, StepFailed
 
@@ -141,11 +142,10 @@ class LayoutDrawingStep(Step):
         cells_v = paths.STEP_DIRS["3_rewrite"] / "nl" / "aion_cells.v"
         self.require(step5 / "minimized_spice", cells_v)
 
-        if cfg.LAYOUT_CORNERS != "typ":
-            warn(f"LAYOUT_CORNERS={cfg.LAYOUT_CORNERS!r}: the exporter will "
-                 "publish one Liberty per corner, and `make pnr` groups cell "
-                 "views by file stem — the extra .lib files become phantom "
-                 "cells with no LEF and PnR refuses to start.")
+        if cfg.LAYOUT_CORNERS == "all":
+            info("LAYOUT_CORNERS=all: each cell is characterized at typ, slow "
+                 "and fast and published with one Liberty per corner; the "
+                 "comparison against the PDK cells stays at typ.")
 
         netlists = sorted((step5 / "minimized_spice").glob("*_minimized.spice"))
         if not netlists:
@@ -311,6 +311,11 @@ class LayoutDrawingStep(Step):
         if key is not None:
             _remember(cell, key)
 
+        # ---- the same layout, already published: keep its characterization.
+        reused = self._reuse_published(ctx, cell, build, final, common)
+        if reused is not None:
+            return reused
+
         # ---- everything after this point is mechanical.
         flow = run.layout("flow", [
             *common,
@@ -345,7 +350,7 @@ class LayoutDrawingStep(Step):
             return CellOutcome(cell, "drawn", verdict="RESULT: PASS",
                                compare=compare, detail="withheld on loss")
 
-        refusal = self._publish(ctx, cell, final)
+        refusal = self._publish(ctx, cell, final, common)
         pex_ok = None
         if cfg.LAYOUT_VERIFY_PEX:
             pex_ok = self._verify_pex(ctx, cell, build, cells_v)
@@ -363,6 +368,66 @@ class LayoutDrawingStep(Step):
                            pex_verified=pex_ok)
 
     # -----------------------------------------------------------------
+    def _reuse_published(self, ctx: Context, cell: str, build: Path,
+                         final: Path, common: list) -> Optional[CellOutcome]:
+        """Publish again from the Liberty already in implementation/cells/, or None.
+
+        What follows a PASS -- PEX, the PDK baseline, SPICE characterization at
+        every corner, the comparison, the PEX re-verification -- is most of this
+        step's time, and all of it depends only on the drawn geometry. So when
+        the GDS verify just built is the same layout as the published one, and
+        the published Liberty is the set LAYOUT_CORNERS asks for, that Liberty
+        is still this layout's. Only the export and the publish checks run
+        again: they take seconds, and they are how a change to the exporter or
+        to a check reaches a cell nobody redrew. None -- run the whole chain --
+        whenever any of that cannot be shown, or with LAYOUT_REUSE=false.
+        """
+        cfg = ctx.cfg
+        published = paths.CELLS_DIR / cell
+        if not cfg.LAYOUT_REUSE or not published.is_dir():
+            return None
+
+        libs = _published_libs(published, cell, cfg.LAYOUT_CORNERS)
+        gds, built = published / f"{cell}.gds", build / f"{cell}.gds"
+        if libs is None:
+            note(f"{cell}: published Liberty is not the LAYOUT_CORNERS="
+                 f"{cfg.LAYOUT_CORNERS} set — characterizing again")
+            return None
+        same = _same_layout(built, gds) if gds.is_file() else False
+        if not same:
+            note(f"{cell}: " + ("layout differs from the published one"
+                                if same is False else
+                                "cannot compare the layout with the published "
+                                "one (no klayout on this host)")
+                 + " — characterizing again")
+            return None
+        compare = _published_compare(build, cell)
+        if (compare and compare.startswith("COMPARE: LOSS")
+                and not cfg.DRAW_PUBLISH_ON_LOSS):
+            return None
+
+        info(f"{cell}: same layout as the published cell — reusing its "
+             f"characterization ({', '.join(p.name for p in libs)}); "
+             "exporting and re-checking only")
+        export = ctx.runner.layout(
+            "export",
+            [*common, "CANDIDATE_LIBS=" + " ".join(str(p) for p in libs)],
+            name=f"{cell}.export")
+        if export.verdict("STEP: export") != "STEP: export OK" and not self.dry_run:
+            warn(f"{cell}: re-export from the published Liberty failed — "
+                 "running the whole chain instead")
+            return None
+
+        refusal = self._publish(ctx, cell, final, common)
+        if refusal is not None:
+            return CellOutcome(cell, "failed", verdict="RESULT: PASS",
+                               compare=compare,
+                               detail=f"not published: {refusal}")
+        return CellOutcome(cell, "drawn", verdict="RESULT: PASS",
+                           compare=compare, published=True,
+                           detail="characterization reused")
+
+    # -----------------------------------------------------------------
     def _verify(self, ctx: Context, cell: str, common: list,
                 turn: Optional[int] = None) -> Optional[str]:
         """Build + DRC + LVS. The verdict is the RESULT: line, not the status.
@@ -370,8 +435,12 @@ class LayoutDrawingStep(Step):
         GNU make reports its own failure as exit 2 whatever the recipe
         returned, so FAIL and ERROR are indistinguishable from the status.
         """
-        result = ctx.runner.layout("verify", common, name=_log(cell, "verify", turn))
-        return result.verdict("RESULT:")
+        return self._verify_run(ctx, cell, common, turn).verdict("RESULT:")
+
+    def _verify_run(self, ctx: Context, cell: str, common: list,
+                    turn: Optional[int] = None) -> Result:
+        """`make verify`, whose Result the caller reads the verdict out of."""
+        return ctx.runner.layout("verify", common, name=_log(cell, "verify", turn))
 
     def _evidence(self, ctx: Context, cell: str, common: list, build: Path,
                   turn: Optional[int] = None) -> str:
@@ -396,10 +465,16 @@ class LayoutDrawingStep(Step):
             return None
         claude = self._claude()
         generator = paths.LAYOUT_CELLS / f"{cell}.py"
+        graded = build / f"{cell}.report.md"
         verdict = None
         idle = 0
         for iteration in range(1, cfg.DRAW_MAX_ITERS + 1):
-            verdict = self._verify(ctx, cell, common, turn=iteration)
+            # The report is rewritten by every verify that gets as far as a
+            # verdict; one left by an earlier turn must never be handed to
+            # the agent as this turn's.
+            graded.unlink(missing_ok=True)
+            result = self._verify_run(ctx, cell, common, turn=iteration)
+            verdict = result.verdict("RESULT:")
             if verdict == "RESULT: PASS":
                 ok(f"{cell}: verified after {iteration - 1} agent turn(s)")
                 return verdict
@@ -409,7 +484,8 @@ class LayoutDrawingStep(Step):
             evidence = self._evidence(ctx, cell, common, build, turn=iteration)
             before = _fingerprint(generator)
             report = self._agent_turn(ctx, claude, cell, netlist, build,
-                                      evidence, iteration)
+                                      agent.verdict_text(graded, result.output), evidence,
+                                      iteration)
 
             # The artifact on disk is the only thing that counts: an agent
             # that timed out after writing a complete generator has done the
@@ -441,7 +517,8 @@ class LayoutDrawingStep(Step):
         return verdict
 
     def _agent_turn(self, ctx: Context, claude: str, cell: str, netlist: Path,
-                    build: Path, evidence: str, iteration: int) -> str:
+                    build: Path, verdict: str, evidence: str,
+                    iteration: int) -> str:
         cfg = ctx.cfg
         generator = paths.LAYOUT_CELLS / f"{cell}.py"
         tool = paths.LAYOUT_TOOL
@@ -475,8 +552,7 @@ class LayoutDrawingStep(Step):
             "the generator is written and verifying; do not report success you "
             "have not seen a RESULT: PASS for.",
             "",
-            "=== evidence from the last verify ===",
-            evidence[:60000] if evidence else "(no evidence packet yet)",
+            *agent.briefing(verdict, evidence),
         ])
 
         argv = [
@@ -517,7 +593,8 @@ class LayoutDrawingStep(Step):
                                if not turn.ok else "")
 
     # -----------------------------------------------------------------
-    def _publish(self, ctx: Context, cell: str, final: Path) -> Optional[str]:
+    def _publish(self, ctx: Context, cell: str, final: Path,
+                 common: list) -> Optional[str]:
         """Copy the exported views into implementation/cells/<CELL>/.
 
         Returns None once the cell is published, or why it was not.
@@ -546,12 +623,14 @@ class LayoutDrawingStep(Step):
             fail(f"{cell}: cannot publish, missing {', '.join(missing)}")
             return f"missing {', '.join(missing)}"
 
-        libs = sorted(final.glob("*.lib"))
-        if len(libs) > 1:
-            fail(f"{cell}: {len(libs)} Liberty files exported. `make pnr` "
-                 "groups views by file stem, so per-corner libs become "
-                 "phantom cells. Re-run with LAYOUT_CORNERS=typ.")
-            return f"{len(libs)} Liberty files exported; use LAYOUT_CORNERS=typ"
+        # One <cell>.lib, or exactly one <cell>_<corner>.lib per timing corner
+        # (LAYOUT_CORNERS=all). `make pnr` reads the second set per corner;
+        # anything in between is a corner PnR cannot link or a corner with
+        # two timing models of the cell.
+        problem = published_lib_problem(cell, [p.name for p in final.glob("*.lib")])
+        if problem is not None:
+            fail(f"{cell}: cannot publish, {problem}")
+            return problem
 
         # The exporter grades the abstract with the same rules, and so does the
         # verify that ended the drawing loop, so a refusal here means the two
@@ -566,6 +645,29 @@ class LayoutDrawingStep(Step):
                 note(f"  {problem}")
             ctx.note(f"{cell} not published: {problems[0]}")
             return f"the LEF would fail PnR: {problems[0]}"
+
+        # The rules above are static and necessary; TritonRoute is the router
+        # step 7 actually runs, and it only tries some via positions. So the
+        # exported LEF is placed in an N and an FS row and handed to OpenROAD's
+        # pin_access before anything is copied. verify already ran the same
+        # check on the LEF it wrote, so a refusal here means the exported
+        # abstract differs from the one the drawing loop was graded on.
+        access = ctx.runner.layout("pin-access", common, name=f"{cell}.pin_access")
+        verdict = access.verdict("STEP: pin_access") or access.verdict("RESULT: ERROR")
+        if verdict != "STEP: pin_access OK":
+            problems = [line.strip()[len("problem: "):]
+                        for line in access.output.splitlines()
+                        if line.strip().startswith("problem: ")]
+            reason = (f"TritonRoute cannot reach it: {problems[0]}"
+                      if verdict == "STEP: pin_access FAIL" and problems
+                      else "TritonRoute pin access did not run")
+            fail(f"{cell}: cannot publish, {reason}")
+            for problem in problems[1:]:
+                note(f"  {problem}")
+            if access.log is not None:
+                note(f"  see {paths.rel_to_project(access.log)}")
+            ctx.note(f"{cell} not published: {reason}")
+            return reason
 
         target = paths.CELLS_DIR / cell
         if target.exists():
@@ -768,6 +870,8 @@ targets:
                 bits.append("pex FAILED")
             if outcome.state == "failed" and outcome.detail:
                 bits.append(f"— {_clip(outcome.detail)}")
+            elif outcome.state == "drawn" and outcome.detail:
+                bits.append(f"({outcome.detail})")
             note(f"  {outcome.cell:<34} {'  '.join(bits)}")
             ctx.note(f"{outcome.cell}: {'  '.join(bits)}")
 
@@ -784,6 +888,49 @@ targets:
         if not published:
             raise StepFailed("no cell was published; step 7 has nothing to place", 1)
         return "ok"
+
+
+def _published_libs(directory: Path, cell: str, corners: str) -> Optional[list]:
+    """The published Liberty of `cell` if it is exactly the set `corners` asks for.
+
+    typ publishes <cell>.lib; all publishes <cell>_<corner>.lib for every corner
+    of LIB_CORNERS. A set of the other shape was characterized at other
+    corners, and cannot stand in for this run's.
+    """
+    names = ([f"{cell}_{corner}.lib" for corner in LIB_CORNERS]
+             if corners == "all" else [f"{cell}.lib"])
+    if sorted(p.name for p in directory.glob("*.lib")) != sorted(names):
+        return None
+    return [directory / name for name in names]
+
+
+def _same_layout(a: Path, b: Path) -> Optional[bool]:
+    """Whether two GDS files hold the same geometry; None when klayout is absent.
+
+    Compared as layouts, not as bytes: every build writes new timestamps into
+    the GDS header, and a byte compare would call an unchanged cell redrawn.
+    """
+    try:
+        import klayout.db as pya
+    except ImportError:
+        return None
+    try:
+        layouts = []
+        for path in (a, b):
+            layout = pya.Layout()
+            layout.read(str(path))
+            layouts.append(layout)
+        return bool(pya.LayoutDiff().compare(*layouts))
+    except Exception:                    # noqa: BLE001 - unreadable is "not the same"
+        return False
+
+
+def _published_compare(build: Path, cell: str) -> Optional[str]:
+    """The COMPARE: line of the characterization being reused, if one is on disk."""
+    try:
+        return json.loads((build / f"{cell}.compare.json").read_text()).get("verdict_line")
+    except (OSError, ValueError):
+        return None
 
 
 def _clip(text: str, limit: int = 160) -> str:

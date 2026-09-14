@@ -35,7 +35,11 @@ implementation/pdk_extension/
     <CELL>.provisional.lib   Liberty for the mapper, before the cell is drawn
     FLOORPLAN.md             the placement/routing plan for the layout stage
     ---- everything below is published by post-layout  (git-ignored) ----
-    <CELL>.lef  .lib  .gds   the views `make pnr` and `merge_lib.py` read
+    <CELL>.lef  .gds         the views `make pnr` reads
+    <CELL>_<corner>.lib      measured Liberty, one per timing corner
+                             (typ_1p20V_25C, slow_1p08V_125C, fast_1p32V_m40C);
+                             <CELL>.lib instead with --corners typ.
+                             `make pnr` and `merge_lib.py` read them per corner
     <CELL>.cdl               the netlist view
     <CELL>.layout.v          the exporter's generated model
     <CELL>.png               the drawn cell, rendered
@@ -57,13 +61,39 @@ view.
 
 ```bash
 docker start iic-osic-tools_shell_uid_1000
-scripts/pdk_cell.py AION_mux2i_1                 # all three stages
-scripts/pdk_cell.py AION_mux2i_1 --from layout   # resume at the layout stage
-scripts/pdk_cell.py AION_mux2i_1 --draw manual   # scaffold the generator, stop
-scripts/pdk_cell.py AION_mux2i_1 --dry-run       # print commands, run none
-
-scripts/pdk_cell.py AION_mux2i_1 --driver-cell sg13g2_buf_2    # see below
+make pdk_cell_generation CELL_NAME=AION_mux2i_1                               # all three stages
+make pdk_cell_generation CELL_NAME=AION_mux2i_1 PDK_CELL_ARGS="--from layout" # resume at the layout stage
+make pdk_cell_generation CELL_NAME=AION_mux2i_1 PDK_CELL_ARGS="--draw manual" # scaffold the generator, stop
+make pdk_cell_generation CELL_NAME=AION_mux2i_1 PDK_CELL_ARGS=--dry-run       # print commands, run none
+make pdk_ext_lib                                                               # then splice the new Liberty in
 ```
+
+`make pdk_cell_generation` runs `scripts/pdk_cell.py <CELL_NAME>` with
+`--driver-cell sg13g2_buf_2` (see below; `PDK_CELL_DRIVER=` goes back to the
+ideal ramp), and anything in `PDK_CELL_ARGS` after it. The script can also be
+called directly with the same arguments.
+
+The three stages apply the checks step 6 applies to the mined cells:
+
+* **layout** grades every turn with `make verify` — DRC, LVS, and on the
+  abstract the static pin access rule, TritonRoute's own `pin_access`, the
+  PDN rail-band and side-edge clearances, and the two-ways-up rule. The
+  drawing agent is handed that verdict itself, every numbered failing
+  condition, together with the evidence packet (which has no verdict of its
+  own), so a cell that is DRC- and LVS-clean but fails the abstract checks is
+  not read as finished. A report left by an earlier turn is deleted before
+  each verify, so it can never be passed off as the current one.
+* **post-layout** exports with the via cuts in the LEF and the rail-band part
+  of each pin's `Metal2` published as `OBS`.
+* **publish** re-grades the exported LEF with `collect_cells.check_lef` before
+  anything is copied.
+
+`--corners` defaults to `all`: the cell and its abutted PDK baseline are
+characterized at typ, slow and fast, and one `<CELL>_<corner>.lib` is
+published per corner (about three times the characterization time; the
+comparison against the baseline stays at typ). `--corners typ` publishes a
+single `<CELL>.lib` instead. A set with a corner missing is refused, and
+publishing removes the Liberty files of the other shape.
 
 ### `--driver-cell` is not optional here
 
@@ -210,8 +240,11 @@ It splices each extension cell's `cell (...) { ... }` block inside the base
 library's closing brace, carries across any lookup-table template the base
 does not already define, refuses on a name collision, and prefers a
 characterized `.lib` over a provisional one so a stale estimate cannot
-quietly outrank a measurement — `<CELL>/<CELL>.lib` is the measurement, and
-it only exists once `post-layout` has published it.
+quietly outrank a measurement. For each corner the measurement is
+`<CELL>/<CELL>_<corner>.lib`, or `<CELL>/<CELL>.lib` for a cell published at
+typ only; either exists only once `post-layout` has published it. A cell
+published per corner with this corner missing is an error, not a fall-back
+to another corner's tables.
 
 ### And the miner needs the same library in its own format
 
@@ -282,10 +315,14 @@ Three knobs and two consequences:
   `CELL_LIBS` is *replaced*, not merged into the PDK's, so a corner left out
   has no Liberty at all and OpenSTA cannot link a netlist at it.
 
-  The cells are characterized at **typ** only, so `merge_lib.py` splices the
-  same typ tables into the fast and slow libraries. That is honest enough for
-  the pre-PnR sanity STA step 1 runs and is **not** something to sign off
-  against; characterize the cell at the other two corners before it matters.
+  A cell published per corner is spliced into each corner's library with its
+  own `<CELL>_<corner>.lib`, so the fast and slow libraries carry fast and
+  slow tables for it. A cell published with a single `<CELL>.lib`
+  (`--corners typ`) puts its typ tables into all three, and `merge_lib.py`
+  prints `characterized at typ only` for it at fast and slow — honest enough
+  for the pre-PnR sanity STA step 1 runs, **not** something to sign off
+  against. At PnR, `make pnr` hands a per-corner set to LibreLane per corner
+  too (each corner's `CELL_LIBS` entry).
 
 * `implementation/pdk_extension/` is one of step 1's recorded inputs, so
   adding or recharacterizing a cell here marks the synthesis — and everything
@@ -324,6 +361,10 @@ sources sit beside the views, and three names would group wrong:
 | `<CELL>.v` | the cell's Verilog model | the **structural** gold reference — a PDK mux2 and inverter. Right for the post-synthesis simulation, wrong for PnR. |
 | `<CELL>.layout.v` | a cell named `<CELL>.layout`, Verilog only, no LEF | the model PnR and the SDF need |
 | `<CELL>.provisional.lib` | a cell named `<CELL>.provisional`, Liberty only | a floorplan **estimate**. A run timed against one is not a result. |
+
+The per-corner Liberty files are named too: `collect_pdk_extension_cells`
+looks for exactly `<CELL>_<corner>.lib` for each corner of
+`collect_cells.LIB_CORNERS`, and never takes the provisional estimate for one.
 
 So `collect_cells.PDK_EXT_VIEW_SUFFIX` names each view instead of inferring
 it, and a cell with no `<CELL>.lef` is simply not offered to PnR — which is

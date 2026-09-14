@@ -485,7 +485,7 @@ to manual.
 | `MINIMIZER_MAX_INPUTS` | `6` | 5 | refuse cells wider than this; verification is 2^inputs vectors |
 | `MINIMIZER_VERIFY` | `True` | 5 | exhaustive switch-level equivalence, pure Python, no simulator |
 | `MINIMIZER_VERIFY_SPICE` | `True` | 5 | the real ngspice 3-way check per cell. Slow, and why step 5 needs the container. |
-| `LAYOUT_CORNERS` | `typ` | 6 | `typ` or `all`. **Keep `typ`** — see below. |
+| `LAYOUT_CORNERS` | `typ` | 6 | `typ` or `all`: one Liberty per cell, or one per timing corner — see below. |
 | `LAYOUT_JOBS` | `8` | 6 | parallel ngspice jobs during characterization |
 | `DRAW_MODE` | `manual` | 6 | `manual` or `auto` |
 | `DRAW_JOBS` | `1` | 6 | cells worked on at once (`-j N`); in `auto`, parallel agent sessions |
@@ -496,6 +496,7 @@ to manual.
 | `DRAW_EFFORT` | `high` | 6 | thinking effort per turn: `low`, `medium`, `high`, `xhigh`, `max` (`None` = leave the CLI's setting alone) |
 | `DRAW_PUBLISH_ON_LOSS` | `True` | 6 | publish a cell that lost the area/delay comparison |
 | `LAYOUT_VERIFY_PEX` | `True` | 6 | re-prove the extracted layout's function in SPICE |
+| `LAYOUT_REUSE` | `True` | 6 | a cell that verifies with the same geometry as its published GDS, and whose published Liberty is the `LAYOUT_CORNERS` set, keeps that characterization: only the export and the publish checks run again (no PEX, baseline, characterization, comparison or PEX re-verification). `False` runs the whole chain, e.g. after changing the characterizer or its stimulus |
 | `SDF_CORNER` | `nom_slow_1p08V_125C` | 7 | also `nom_typ_1p20V_25C`, `nom_fast_1p32V_m40C` |
 | `PNR_SIM_TOOL` | `icarus` | 7 | `icarus` keeps the SDF delays; `verilator` drops them |
 | `RENDER_WIDTH` | `2400` | 8 | image width in pixels; the header and legend come out of it |
@@ -509,11 +510,17 @@ Three of those decide whether the flow works at all:
 - **`ELITE_COUNT`** — every kept cell costs a drawn layout, so this is the
   knob that decides how long step 6 takes. `--draw-jobs` buys some of that
   back by drawing them in parallel.
-- **`LAYOUT_CORNERS = typ`** — `all` makes the exporter publish one Liberty
-  per corner, and `make pnr` groups cell views by file stem, so the extra
-  `.lib` files become phantom cells with no LEF and PnR refuses to start. The
-  cost of pinning it: LibreLane reads that one typ Liberty into all three STA
-  corners, so setup at slow and hold at fast are characterized with typ data.
+- **`LAYOUT_CORNERS`** — `typ` characterizes each cell once, and LibreLane
+  reads that one Liberty into all three STA corners, so setup at slow and hold
+  at fast are timed with typ data through every AION cell. `all` characterizes
+  typ, slow and fast (about three times the characterization time; the
+  comparison against the PDK cells stays at typ) and publishes
+  `<CELL>_typ_1p20V_25C.lib`, `<CELL>_slow_1p08V_125C.lib` and
+  `<CELL>_fast_1p32V_m40C.lib`. `make pnr` groups those into the one cell and
+  appends each to its own corner's `CELL_LIBS`, after the PDK's unchanged
+  libraries, so each corner times the cell with its own data — and the
+  OpenROAD GUI, which reads `CELL_LIBS` but not `EXTRA_LIBS`, loads them too.
+  A cell with only some of the corners is refused.
 - **`DRAW_MODE = manual`** — so a plain `./flow.py` never silently spends
   model tokens.
 
@@ -628,7 +635,11 @@ the cell, step 7 could not start either. The reason follows the colon. "The LEF
 would fail PnR" is a pin-access finding: `make verify` grades the same LEF with
 the same rule, so the drawing loop reports it too — redraw, don't work around
 it. "The exporter refused it" is usually the netlist's function disagreeing
-with the Liberty.
+with the Liberty. "TritonRoute cannot reach it" is OpenROAD's own
+`pin_access` on the exported LEF (`make aion-layout-pin-access`, log in
+`flow/logs/6_layout_drawing/<CELL>.pin_access.log`) finding a pin detailed
+routing would abort on with `DRT-0073`; `make verify` runs the same check, so
+this one also means redraw.
 
 **Step 7 refuses with "cells that have no published views"** — the netlist
 instantiates cells step 6 has not drawn yet. Finish step 6, or re-run step 3

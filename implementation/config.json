@@ -84,7 +84,7 @@
     "10 um of both. LibreLane's default of four rows would end them ~15 um in."
   ],
   "FP_SIZING": "absolute",
-  "DIE_AREA": [0, 0, 854.40, 313.74],
+  "DIE_AREA": [0, 0, 854.4, 313.74],
   "TOP_MARGIN_MULT": 1,
   "BOTTOM_MARGIN_MULT": 1,
   "LEFT_MARGIN_MULT": 6,

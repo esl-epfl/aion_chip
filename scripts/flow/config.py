@@ -128,10 +128,13 @@ class Config:
     # =====================================================================
     # 6_layout_drawing   (aion_layout_claude)
     # =====================================================================
-    # LAYOUT_CORNERS  MUST stay "typ".  "all" makes the exporter publish one
-    #                 Liberty per corner, and `make pnr` groups cell views by
-    #                 file stem -- three .lib files become three phantom
-    #                 cells with no LEF and no GDS, and PnR refuses to start.
+    # LAYOUT_CORNERS  typ | all.  "typ" characterizes each cell once and
+    #                 LibreLane reads that one Liberty into all three STA
+    #                 corners, so slow and fast slack through an AION cell
+    #                 rest on typ data.  "all" characterizes typ, slow and fast
+    #                 and publishes <CELL>_<corner>.lib for each; `make pnr`
+    #                 puts each into its own corner.  About three times the
+    #                 characterization time; the PDK comparison stays at typ.
     # DRAW_MODE       manual | auto.  See step 6 for the loop.
     # DRAW_JOBS       cells worked on at once -- in auto mode that is this
     #                 many concurrent `claude` sessions, each also driving
@@ -147,7 +150,7 @@ class Config:
     # DRAW_EFFORT     how hard it thinks per turn: low | medium | high |
     #                 xhigh | max.  Either of these set to None ("none" on
     #                 the command line) leaves the CLI's own setting alone.
-    LAYOUT_CORNERS: str = "typ"
+    LAYOUT_CORNERS: str = "all"
     LAYOUT_JOBS: int = 8
     DRAW_MODE: str = "auto"
     DRAW_JOBS: int = 2
@@ -161,6 +164,14 @@ class Config:
     DRAW_PUBLISH_ON_LOSS: bool = True
     # PEX SPICE re-verification of the extracted layout (needs the container).
     LAYOUT_VERIFY_PEX: bool = True
+    # A cell that verifies with the same geometry as the one already in
+    # implementation/cells/, with the Liberty set LAYOUT_CORNERS asks for, keeps
+    # that characterization: only the export and the publish checks run again,
+    # not PEX, the baseline, characterization, the comparison or the PEX
+    # re-verification.  False always runs the whole chain -- e.g. after changing
+    # the characterizer, its stimulus or its corners' definitions, none of
+    # which the geometry shows.
+    LAYOUT_REUSE: bool = True
 
     # =====================================================================
     # 7_pnr

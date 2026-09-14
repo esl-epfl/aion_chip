@@ -35,6 +35,8 @@ import argparse
 import re
 from pathlib import Path
 
+from collect_cells import LIB_CORNERS
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_BASE = (PROJECT_ROOT / "aion_flow" / "tech" / "lib"
@@ -139,6 +141,42 @@ def merge(base_text: str, extensions: "list[tuple[str, str]]",
             + base_text[close:], added)
 
 
+def extension_liberty(cell: str, corner: str, provisional: bool = False,
+                      root: Path = DEFAULT_EXT_ROOT) -> "tuple[Path, str]":
+    """The Liberty to splice for one extension cell at one corner, and why that one.
+
+    A cell published per corner (scripts/pdk_cell.py --corners all) is spliced
+    with that corner's own <CELL>_<corner>.lib, so the slow library the mapper
+    and the pre-PnR STA read carries slow tables for it. A cell published once
+    (--corners typ) is spliced with its <CELL>.lib, which then puts typ tables
+    into every corner. A per-corner set missing this corner is an error, not a
+    quiet fall-back to another corner's data. The characterized Liberty always
+    wins over the provisional estimate, which is only used when asked for, so
+    a stale estimate can never quietly outrank a measurement.
+    """
+    directory = root / cell
+    own = directory / f"{cell}_{corner}.lib"
+    if own.exists():
+        return own, "characterized"
+    corner_set = [c for c in LIB_CORNERS if (directory / f"{cell}_{c}.lib").exists()]
+    if corner_set:
+        raise SystemExit(
+            f"error: {cell} is published per corner ({', '.join(corner_set)}) "
+            f"but has no Liberty for {corner}.\n"
+            f"       Re-run scripts/pdk_cell.py {cell} --from post-layout.")
+    single = directory / f"{cell}.lib"
+    if single.exists():
+        return single, ("characterized" if corner == "typ_1p20V_25C"
+                        else "characterized at typ only")
+    estimate = directory / f"{cell}.provisional.lib"
+    if provisional and estimate.exists():
+        return estimate, "PROVISIONAL"
+    raise SystemExit(
+        f"error: {cell} has no characterized Liberty for {corner} in {directory}.\n"
+        f"       Draw it (make pdk_cell_generation CELL_NAME={cell}), or pass "
+        f"--provisional to use the pre-layout estimate.")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Splice PDK-extension cells into the standard-cell "
@@ -186,26 +224,11 @@ def main(argv=None) -> int:
         cells = sorted(p.name for p in DEFAULT_EXT_ROOT.glob("*")
                        if p.is_dir() and p.name != "views")
     for cell in cells:
-        # The characterized Liberty step 3 of pdk_cell.py writes wins; the
-        # provisional one is only used when asked for, so a stale estimate
-        # can never quietly outrank a measurement.
-        measured = DEFAULT_EXT_ROOT / cell / f"{cell}.lib"
-        provisional = DEFAULT_EXT_ROOT / cell / f"{cell}.provisional.lib"
-        if measured.exists():
-            sources.append((str(measured), measured.read_text()))
-            print(f"  {cell}: characterized  "
-                  f"{measured.relative_to(PROJECT_ROOT)}")
-        elif args.provisional and provisional.exists():
-            sources.append((str(provisional), provisional.read_text()))
-            print(f"  {cell}: PROVISIONAL    "
-                  f"{provisional.relative_to(PROJECT_ROOT)}  "
-                  f"(area is an estimate, not a measurement)")
-        else:
-            raise SystemExit(
-                f"error: {cell} has no characterized Liberty at "
-                f"{measured.relative_to(PROJECT_ROOT)}.\n"
-                f"       Draw it (scripts/pdk_cell.py {cell}), or pass "
-                f"--provisional to use the pre-layout estimate.")
+        path, how = extension_liberty(cell, args.corner, args.provisional)
+        sources.append((str(path), path.read_text()))
+        note = {"PROVISIONAL": "  (area is an estimate, not a measurement)",
+                "characterized at typ only": "  (typ tables at this corner)"}.get(how, "")
+        print(f"  {cell}: {how}  {path.relative_to(PROJECT_ROOT)}{note}")
 
     if not sources:
         raise SystemExit("error: nothing to merge")

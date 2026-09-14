@@ -43,7 +43,7 @@ endif
 
 .PHONY: all sim post_synth_sim post_synth_sim_ai post_pnr_sim post_pnr_sim_ai sim_all setup format \
         clean clean-impl clean-flow clean-all waves synth pnr pnr_simple librelane \
-        openroad klayout logo pdk_ext_lib tt_precheck _save_run _setup_cocotb_env _require_sdf _check_sim_results \
+        openroad klayout logo pdk_ext_lib pdk_cell_generation tt_precheck _save_run _setup_cocotb_env _require_sdf _check_sim_results \
         flow flow-status flow-list universal universal-update
 
 all: sim
@@ -299,6 +299,7 @@ CELLS_DIR            ?= $(IMPL_DIR)/cells
 # plus ours. scripts/merge_lib.py does the splicing; see
 # implementation/pdk_extension/README.md for why.
 #
+#   make pdk_cell_generation CELL_NAME=AION_mux2i_1   build one cell (see below)
 #   make pdk_ext_lib            regenerate the extended Liberty
 #   make synth PDK_EXT=0        synthesize against the plain PDK library
 #   make pdk_ext_lib MERGE_LIB_ARGS=--provisional   before the cell is drawn
@@ -310,9 +311,9 @@ CELLS_DIR            ?= $(IMPL_DIR)/cells
 #
 # One Liberty per STA corner, because CELL_LIBS is replaced rather than merged
 # and a corner with no Liberty is a corner OpenSTA cannot link the netlist at.
-# The cells are characterized at typ only, so the fast and slow libraries
-# carry the typ tables for them -- fine for the pre-PnR sanity STA that step 1
-# runs, not something to sign anything off against.
+# A cell characterized at every corner (pdk_cell_generation's default) is
+# spliced into each corner's library with its own <CELL>_<corner>.lib; one
+# published with a single <CELL>.lib puts its typ tables into all three.
 PDK_EXT              ?= 1
 MERGE_LIB_ARGS       ?=
 PDK_EXT_DIR           = $(IMPL_DIR)/pdk_extension
@@ -462,6 +463,35 @@ define librelane_finish
 	fi; \
 	exit $$status
 endef
+
+# Characterize, draw and re-characterize one hand-designed cell: the three
+# stages of scripts/pdk_cell.py (characterize -> layout -> post-layout), with
+# the same verify, export and publish checks step 6 applies to the mined cells.
+# The layout stage drives the drawing agent until `make verify` passes; the
+# post-layout stage publishes into implementation/pdk_extension/<CELL>/, with
+# one Liberty per timing corner unless PDK_CELL_ARGS says --corners typ.
+#
+#   make pdk_cell_generation CELL_NAME=AION_mux2i_1
+#   make pdk_cell_generation CELL_NAME=AION_mux2i_1 PDK_CELL_ARGS="--from layout"
+#   make pdk_cell_generation CELL_NAME=AION_mux2i_1 PDK_CELL_ARGS=--dry-run
+#
+# PDK_CELL_DRIVER is the cell every input is driven through while the Liberty
+# is measured. The default is a real buffer, not the ideal ramp, because every
+# cell in that directory has a transmission gate on an input path, where the
+# driver stays in series with the channel. Empty (PDK_CELL_DRIVER=) goes back
+# to the ramp. It must be non-inverting.
+CELL_NAME            ?=
+PDK_CELL_DRIVER      ?= sg13g2_buf_2
+PDK_CELL_ARGS        ?=
+
+pdk_cell_generation: ## Build one PDK-extension cell: characterize, draw, re-characterize (CELL_NAME=, PDK_CELL_ARGS=)
+	@if [ -z "$(CELL_NAME)" ]; then \
+		echo "Error: name the cell, e.g. make pdk_cell_generation CELL_NAME=AION_mux2i_1"; \
+		echo "       cells under $(PDK_EXT_DIR)/: $(or $(PDK_EXT_CELLS),none)"; \
+		exit 1; \
+	fi
+	$(PYTHON) $(PROJECT_ROOT)/scripts/pdk_cell.py $(CELL_NAME) \
+		$(if $(PDK_CELL_DRIVER),--driver-cell $(PDK_CELL_DRIVER)) $(PDK_CELL_ARGS)
 
 pdk_ext_lib: ## Splice the PDK-extension cells into the standard-cell Liberty + aion_opt's tech dict -> flow/pdk_extension/
 	@if [ -z "$(PDK_EXT_CELLS)" ]; then \

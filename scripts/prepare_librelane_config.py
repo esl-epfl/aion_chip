@@ -15,7 +15,28 @@ import sys
 from decimal import Decimal
 
 from collect_cells import (collect_cells, collect_pdk_extension_cells,
-                           EXTRA_KEY_BY_VIEW)
+                           corner_lib_problems, EXTRA_KEY_BY_VIEW, LIB_CORNERS)
+
+# CELL_LIBS as ihp-sg13g2 declares it (libs.tech/librelane/config.tcl): per
+# corner, the standard cells and then the I/O pads. Restated only when a cell
+# brings a Liberty per corner, because LibreLane replaces CELL_LIBS wholesale
+# rather than merging into the PDK's. The standard-cell library stays first:
+# the IR-drop step reads the supply voltage off the first library it finds.
+PDK_CELL_LIBS = {
+    "typ_1p20V_25C": (
+        "pdk_dir::libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_typ_1p20V_25C.lib",
+        "pdk_dir::libs.ref/sg13g2_io/lib/sg13g2_io_typ_1p2V_3p3V_25C.lib",
+    ),
+    "fast_1p32V_m40C": (
+        "pdk_dir::libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_fast_1p32V_m40C.lib",
+        "pdk_dir::libs.ref/sg13g2_io/lib/sg13g2_io_fast_1p32V_3p6V_m40C.lib",
+    ),
+    "slow_1p08V_125C": (
+        "pdk_dir::libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_slow_1p08V_125C.lib",
+        "pdk_dir::libs.ref/sg13g2_io/lib/sg13g2_io_slow_1p08V_3p0V_125C.lib",
+    ),
+}
+assert set(PDK_CELL_LIBS) == set(LIB_CORNERS), "PDK_CELL_LIBS and LIB_CORNERS disagree"
 
 
 # Flow that stops after synthesis for VHDL designs. Synthesis proper, its
@@ -70,6 +91,50 @@ def make_relative(path: str, base: str) -> str:
 
     rel = os.path.relpath(abs_path, abs_base)
     return f"dir::{rel}"
+
+
+def cell_library_config(sources, ip_dir: str, cell_libs):
+    """The EXTRA_* views and the CELL_LIBS map for the cells PnR is handed.
+
+    `sources` is [(label, cells)] from collect_cells(); `cell_libs` is the
+    CELL_LIBS map --cell-lib built, or empty. Returns (views, cell_libs):
+    views maps each EXTRA_* key to its dir:: paths, and cell_libs is the map to
+    write, or the one given when no cell brings a Liberty per corner.
+
+    A cell's single <CELL>.lib goes to EXTRA_LIBS, which LibreLane loads into
+    every timing corner alike. A Liberty per corner cannot go there -- each
+    corner would read all of them -- so each one is appended to its own
+    corner's CELL_LIBS entry, after the PDK's libraries for that corner, which
+    are left exactly as they were. Raises ValueError for a cell whose corner set
+    is incomplete or doubled: no Liberty in a corner cannot link, and two in one
+    corner is two timing models of the same cell.
+    """
+    views = {}
+    per_corner = {}
+    for _, cells in sources:
+        for cell in cells:
+            errors, _ = corner_lib_problems(cell)
+            if errors:
+                raise ValueError(errors[0])
+            for view, path in cell.views.items():
+                views.setdefault(EXTRA_KEY_BY_VIEW[view], []).append(
+                    make_relative(path, ip_dir))
+            for corner, path in cell.corner_libs.items():
+                per_corner.setdefault(corner, []).append(make_relative(path, ip_dir))
+    if not per_corner:
+        return views, cell_libs
+
+    merged = {key: list(paths) for key, paths in (
+        cell_libs or {f"*_{corner}": PDK_CELL_LIBS[corner] for corner in LIB_CORNERS}
+    ).items()}
+    for corner, paths in sorted(per_corner.items()):
+        key = f"*_{corner}"
+        if key not in merged:
+            raise ValueError(
+                f"CELL_LIBS has no {key!r} entry to add the {corner} Liberty of "
+                f"the cells to; it has {', '.join(sorted(merged))}")
+        merged[key] += sorted(paths)
+    return views, merged
 
 
 def def_die_area(path: str) -> list:
@@ -342,17 +407,23 @@ def main():
     # lists, because from PnR's side there is no difference: a leaf standard
     # cell with a LEF, a Liberty and a GDS.
     #
-    # Their Liberty goes to EXTRA_LIBS and NOT to CELL_LIBS, which is the
-    # opposite of what `make synth` does with the same cells. Both are right.
-    # Synthesis has to offer them to ABC, and only CELL_LIBS is read by the
-    # mapper. PnR maps nothing -- the netlist is fixed, and `--from
+    # A single Liberty per cell goes to EXTRA_LIBS and NOT to CELL_LIBS, which
+    # is the opposite of what `make synth` does with the same cells. Both are
+    # right. Synthesis has to offer them to ABC, and only CELL_LIBS is read by
+    # the mapper. PnR maps nothing -- the netlist is fixed, and `--from
     # Checker.NetlistAssignStatements` skips synthesis entirely -- so all the
     # Liberty has to do is let OpenSTA link and time the instances, which is
-    # exactly what EXTRA_LIBS is for. Putting them in both would define every
-    # extension cell twice, and replacing CELL_LIBS here would mean `make pnr`
-    # and `make pnr_simple` were timed against differently-built libraries --
-    # the substitution has to be the only variable between them, or step 9's
-    # comparison is measuring two things at once.
+    # what EXTRA_LIBS is for. Putting them in both would define every
+    # extension cell twice.
+    #
+    # EXTRA_LIBS is read into every timing corner alike, though, so a cell
+    # characterized per corner (<CELL>_<corner>.lib, LAYOUT_CORNERS=all) has
+    # each corner's Liberty appended to that corner's CELL_LIBS entry instead,
+    # after the PDK's own libraries, which stay exactly as they were: the PDK
+    # cells are timed against the same files as in `make pnr_simple`, so the
+    # substitution is still the only variable between the two runs, and step
+    # 9's comparison still measures one thing. CELL_LIBS also feeds the
+    # OpenROAD GUI's library list, which EXTRA_LIBS never reaches.
     # ------------------------------------------------------------------
     for extra_key in EXTRA_KEY_BY_VIEW.values():
         config.pop(extra_key, None)
@@ -364,22 +435,25 @@ def main():
         sources.append((args.pdk_ext_dir,
                         collect_pdk_extension_cells(args.pdk_ext_dir)))
 
-    views = {}
     for label, cells in sources:
         if not cells:
             print(f"  cells: none found under {label}")
             continue
-        for cell in cells:
-            for view, path in cell.views.items():
-                views.setdefault(EXTRA_KEY_BY_VIEW[view], []).append(
-                    make_relative(path, args.ip_dir)
-                )
         print(f"  cells: {len(cells)} from {label} "
               f"({', '.join(c.name for c in cells)})")
+    try:
+        views, with_cells = cell_library_config(sources, args.ip_dir, cell_libs)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     for key, paths in sorted(views.items()):
         config[key] = sorted(paths)
     if views:
         print(f"  cell views -> {', '.join(sorted(views))}")
+    if with_cells is not cell_libs:
+        config["CELL_LIBS"] = with_cells
+        for corner, libs in sorted(with_cells.items()):
+            print(f"  cell libs {corner}: {', '.join(libs)}")
 
     # ------------------------------------------------------------------
     # Macros

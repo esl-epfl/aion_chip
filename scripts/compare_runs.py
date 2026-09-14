@@ -249,7 +249,11 @@ def cell_ledger(rewrite_report: Path, cells_dir: Path) -> Tuple[List[CellRow], d
 
     for pattern in report.get("patterns", []):
         cell = pattern["module_name"]
+        # Area is the same at every corner: a cell published per corner is
+        # read from its typ Liberty.
         lib = Path(cells_dir) / cell / f"{cell}.lib"
+        if not lib.is_file():
+            lib = Path(cells_dir) / cell / f"{cell}_typ_1p20V_25C.lib"
         each = liberty_area(lib, cell)
         occurrences = int(pattern["occurrences"])
         rows.append(CellRow(
@@ -589,9 +593,10 @@ def render_markdown(record: dict) -> str:
     add("- Placement and routing are seeded heuristics. Deltas under "
         f"{TIE_BAND_PCT}% are reported as ties because a re-run moves them by "
         "about that much on its own.")
-    add("- The AI cells are characterized at one corner (`LAYOUT_CORNERS=typ`) "
-        "and LibreLane reads that Liberty into all three STA corners, so slow "
-        "and fast slack for paths through an AION cell rest on typ data.")
+    add("- An AI cell characterized at one corner (`LAYOUT_CORNERS=typ`) has "
+        "that Liberty read into all three STA corners, so slow and fast slack "
+        "through it rest on typ data; with `LAYOUT_CORNERS=all` each corner "
+        "reads the cell's own Liberty.")
     add("- Power is a switching-activity estimate, not a measurement.")
     add("")
     return "\n".join(out)

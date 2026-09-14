@@ -50,6 +50,48 @@ _INPUT_KEYS = ("command", "file_path", "path", "pattern", "notebook_path",
 _VERDICTS = ("RESULT:", "COMPARE:", "STEP:")
 
 
+def verdict_text(report: Path, output: str) -> str:
+    """What `make verify` graded this turn, for the drawing agent to work from.
+
+    `report` is the file verify writes (`<BUILD_DIR>/<CELL>.report.md`):
+    steps.render_verdict's own text -- every measurement, then every failing
+    condition numbered, then the RESULT: line. The evidence packet carries no
+    verdict of its own, and handed only that, the agent saw a clean DRC and LVS
+    and none of the abstract (LEF) or TritonRoute failures. A verify that died
+    before grading anything writes no report, so the end of its `output`
+    stands in. The caller deletes the report before verify runs, so one left
+    by an earlier turn is never passed off as this turn's.
+    """
+    try:
+        return report.read_text()
+    except OSError:
+        tail = "\n".join(output.strip().splitlines()[-60:])
+        return ("(make verify wrote no report this turn; the end of its "
+                f"output follows)\n{tail}")
+
+
+def briefing(verdict: str, evidence: str) -> list:
+    """The prompt lines that hand the agent the last verify: verdict, then evidence.
+
+    One copy for every loop that drives the drawing agent -- step 6 and
+    scripts/pdk_cell.py -- so the two cannot drift into telling it different
+    things about what failed.
+    """
+    return [
+        "=== the verdict of the last `make verify` ===",
+        "Every numbered failing condition below has to be fixed; several of "
+        "them (the abstract (LEF) and abstract (TritonRoute) ones) are about "
+        "what the placed cell does to the power grid, its neighbours and the "
+        "router, and are invisible in DRC and LVS.",
+        verdict[:20000],
+        "",
+        "=== evidence packet (`make evidence`) ===",
+        "Where the DRC items, the LVS digest and the layout are. Its [2] "
+        "VERDICT block is empty: the verdict above is the one that counts.",
+        evidence[:60000] if evidence else "(no evidence packet yet)",
+    ]
+
+
 @dataclass
 class AgentTurn:
     """What one `claude -p` invocation did, as observed from outside."""

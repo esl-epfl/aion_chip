@@ -84,7 +84,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 #: here, and a second copy of them would be a second copy to keep honest.
 #: The host-side LEF sanity check `make pnr` would otherwise discover an hour
 #: into detailed routing.  Same one step 6 publishes through.
-from collect_cells import check_lef
+from collect_cells import check_lef, published_lib_problem
 
 from flow import agent
 
@@ -276,6 +276,11 @@ class Cell:
     def evidence(self) -> Path:
         """What the last verify found, as the drawing agent's briefing."""
         return self.build / "layout" / f"{self.name}.evidence.md"
+
+    @property
+    def report(self) -> Path:
+        """The verdict the last verify wrote: every failing condition, numbered."""
+        return self.build / "layout" / f"{self.name}.report.md"
 
     def require_sources(self) -> None:
         missing = [p for p in (self.verilog, self.spice) if not p.exists()]
@@ -613,7 +618,11 @@ def _draw_auto(cell: Cell, run: Runner, common: list, draw: Draw) -> str | None:
     verdict = None
     idle = 0
     for turn in range(1, draw.max_iters + 1):
-        verdict = _verify(cell, run, common, turn).verdict("RESULT:")
+        # Every verify that reaches a verdict rewrites the report; one left
+        # by an earlier turn must never be handed to the agent as this one's.
+        cell.report.unlink(missing_ok=True)
+        result = _verify(cell, run, common, turn)
+        verdict = result.verdict("RESULT:")
         if verdict == "RESULT: PASS":
             ok(f"verified after {turn - 1} agent turn(s)")
             return verdict
@@ -621,7 +630,9 @@ def _draw_auto(cell: Cell, run: Runner, common: list, draw: Draw) -> str | None:
         info(f"turn {turn}/{draw.max_iters}  ({verdict or 'no verdict'})")
         evidence = _evidence(cell, run, common, turn)
         before = _fingerprint(cell.generator)
-        report = _agent_turn(cell, run, draw, evidence, turn)
+        report = _agent_turn(cell, run, draw,
+                             agent.verdict_text(cell.report, result.output),
+                             evidence, turn)
 
         if _fingerprint(cell.generator) == before:
             idle += 1
@@ -683,8 +694,17 @@ def _floorplan_section(cell: Cell) -> list:
     ]
 
 
-def _agent_turn(cell: Cell, run: Runner, draw: Draw, evidence: str, turn: int) -> str:
-    """One `claude -p`, narrated while it runs.  Grades nothing."""
+def _agent_turn(
+    cell: Cell, run: Runner, draw: Draw, verdict: str, evidence: str, turn: int
+) -> str:
+    """One `claude -p`, narrated while it runs.  Grades nothing.
+
+    The prompt carries this turn's verify verdict as well as the evidence
+    packet, the way step 6's does (flow.agent.briefing).  The packet's own
+    VERDICT block is empty, and handed only that, the agent reads a clean DRC
+    and LVS and never hears about the pin access, rail-band, side-edge or
+    two-ways-up failures -- which are exactly what AION_mux2i_1/2 fail.
+    """
 
     def cmd(target: str) -> str:
         return (
@@ -727,8 +747,7 @@ def _agent_turn(cell: Cell, run: Runner, draw: Draw, evidence: str, turn: int) -
             "not seen a RESULT: PASS for.",
             "",
             *_floorplan_section(cell),
-            "=== evidence from the last verify ===",
-            evidence[:60000] if evidence else "(no evidence packet yet)",
+            *agent.briefing(verdict, evidence),
         ]
     )
 
@@ -868,9 +887,11 @@ def _publish_views(cell: Cell) -> bool:
 
     `aion_layout flow` writes the views to its own `BUILD_DIR/final` and does
     not take a destination, which is why they are copied out here.  It matters
-    because `merge_lib.py` reads the *measured* Liberty from
-    `<CELL>/<CELL>.lib`, and until it is there the mapper keeps choosing this
-    cell on the provisional area estimate.
+    because `merge_lib.py` reads the *measured* Liberty from `<CELL>/` -- one
+    `<CELL>_<corner>.lib` per corner with `--corners all`, `<CELL>.lib` with
+    `--corners typ` -- and until it is there the mapper keeps choosing this
+    cell on the provisional area estimate.  Publishing clears the other shape,
+    so a set from an earlier run never sits beside this one.
 
     A `.rejected` file is the exporter refusing to publish, which is a finding
     about the cell; nothing is copied on top of a refusal.
@@ -892,13 +913,14 @@ def _publish_views(cell: Cell) -> bool:
         fail(f"cannot publish, missing {', '.join(missing)}")
         return False
 
-    libs = [p for p in written if p.suffix.lower() == ".lib"]
-    if len(libs) > 1:
-        fail(
-            f"{len(libs)} Liberty files exported. `merge_lib.py` and "
-            "`make pnr` both look for exactly <CELL>.lib, so per-corner "
-            "libs cannot be published. Re-run with --corners typ."
-        )
+    # <CELL>.lib, or exactly one <CELL>_<corner>.lib per timing corner: what
+    # merge_lib.py splices per corner and `make pnr` times per corner. A set
+    # with a corner missing is a corner neither can use.
+    problem = published_lib_problem(
+        cell.name, [p.name for p in written if p.suffix.lower() == ".lib"]
+    )
+    if problem is not None:
+        fail(f"cannot publish, {problem}")
         return False
 
     # The exporter grades the abstract too, and a cell that fails there
@@ -999,9 +1021,11 @@ def _report_views(cell: Cell) -> None:
         for line in compare.read_text().splitlines():
             if line.startswith("COMPARE:") or "row sites" in line:
                 info(line.strip())
+    libs = sorted(p.name for p in cell.dir.glob(f"{cell.name}*.lib")
+                  if not p.name.endswith(".provisional.lib"))
     info(
-        f"re-run scripts/merge_lib.py so the mapper sees the measured "
-        f"{cell.name}.lib instead of the provisional estimate"
+        f"run `make pdk_ext_lib` so the mapper sees the measured Liberty "
+        f"({', '.join(libs) or 'none'}) instead of the provisional estimate"
     )
 
 
@@ -1066,10 +1090,11 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--corners",
-        default="typ",
-        help="Liberty corners to characterize (default: typ; "
-        "'all' publishes one .lib per corner, which "
-        "`make pnr` cannot group)",
+        default="all",
+        choices=("all", "typ"),
+        help="Liberty corners to characterize (default: all -- typ, slow and "
+        "fast, published as <CELL>_<corner>.lib; 'typ' publishes one "
+        "<CELL>.lib that every STA corner reads alike)",
     )
     parser.add_argument(
         "--driver-cell",
