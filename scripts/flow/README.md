@@ -80,8 +80,10 @@ flow/
 
   1_synth/            nl/ sdf/ reports/ metrics.json
   2_pattern_extraction/   aion_cells.v  aion_cells_elite.v
-                          work/selection.json  report/pattern_report.json
-  3_rewrite/          nl/{aion_cells.v, tt_um_aion.nl.v}  report/
+                          work/{selection.json, tech_dict.json}
+                          report/pattern_report.json
+  3_rewrite/          nl/{aion_cells.v, tt_um_aion.nl.v}  work/tech_dict.json
+                      report/
   4_characterization/ steps/aion_char/tb/{sv,spice}/  gold_functions.md
   5_gate_minimization/ raw_spice/  minimized_spice/
   6_layout_drawing/   <CELL>/{drc,lvs,pex,char,baseline,final}/
@@ -133,6 +135,93 @@ as ordinary PDK cells. You do not need to touch `selection.json`; the cell
 library is not part of its fingerprint, which is exactly what makes this cheap.
 
 `REWRITE_CELLS=elite` (the default) and `=all` pick step 2's two outputs.
+
+## Cells the miner leaves alone
+
+`MINE_EXCLUDE` is a comma-separated list of globs on cell names, default
+`*xor*,*xnor*`. A matching cell stays in the netlist but never goes *inside* a
+mined pattern: its pins are pattern boundaries, the way a flip-flop's are. It
+applies to steps 2 and 3, and to `scripts/explore_cells.py` (below).
+
+**Why XOR and XNOR are out by default.** A mined XOR pair buys no area. The
+seven XOR/XNOR-pair cells drawn in `implementation/cells/` are each 7.68 µm
+(16 sites), exactly twice `sg13g2_xor2_1`'s 3.84 µm: XOR is not unate, so
+step 5 has no smaller single CMOS stack to rebuild the pair as. But xor2/xnor2
+are about a quarter of the netlist's standard-cell area, and `AREA_FACTOR`
+credits every substitution with the same fractional saving, so left in they
+dominate both the cover and the elite cut. The result is a library of cells
+that get drawn and save nothing. XOR area is a job for the PDK extension
+instead: a hand-designed leaf cell such as xor3 or a full-adder slice (see
+`implementation/pdk_extension/README.md`), not a mined pair.
+
+**How.** Steps 2 and 3 each write `work/tech_dict.json` into their own step
+directory. It is a copy of the dictionary they would otherwise read — the
+extended one with `PDK_EXT` on, aion_flow's own with it off — with
+`"mineable": false` on every matching cell. That is the same mark
+`make pdk_ext_lib` puts on the extension cells, and aion_opt builds its mining
+graph without any cell that carries it. Every drive strength a glob matches is
+marked, because aion_opt folds strengths onto one key. The step prints which
+cells were matched, and warns about a glob that matches none, which is usually
+a typo.
+
+```bash
+./flow.py 2..3                                        # config.py's MINE_EXCLUDE
+./flow.py 2..3 --set 'MINE_EXCLUDE=*xor*,*xnor*,*mux2*'   # quote it: the shell expands globs
+./flow.py 2..3 --set MINE_EXCLUDE=                    # mine every cell, as before
+```
+
+Use the same value in both steps. The selection cache is fingerprinted by the
+dictionary's *content*, so a step 3 run with a different `MINE_EXCLUDE`
+misses the cache and mines a cover of its own (see Troubleshooting).
+
+Cells already drawn for an excluded pattern (`AION_xor2_5`, `AION_xnor2_xor2_7`,
+…) keep their layouts in `implementation/cells/` and their entries in
+`registry.json`. The miner no longer finds their patterns, so step 3 never
+instantiates them. Nothing needs deleting: a later run that mines those
+patterns again gets them back under the same names.
+
+### The same exclusion in the design-space sweep
+
+`scripts/explore_cells.py` is not a step. It mines the netlist once at the
+loosest corner of a grid of step-2/3 knobs and scores every tighter point in
+memory. `sweep` ranks the grid (`--emit` writes the winner as a drop-in step-2
+directory), and `survey` histograms the raw enumeration. Everything it writes
+goes under `flow/explore/`.
+
+It mines against the dictionary step 2 would use: the same base and the same
+`MINE_EXCLUDE`, both read from `config.py`, written to
+`<work-dir>/tech_dict.json` by the same function.
+
+```bash
+scripts/explore_cells.py sweep                                  # no XORs (config.py)
+scripts/explore_cells.py sweep --mine-exclude ''                # every cell
+scripts/explore_cells.py sweep --mine-exclude '*xor*,*xnor*,*mux2*'
+scripts/explore_cells.py survey --mine-exclude ''
+scripts/explore_cells.py sweep --cell-lib aion_flow/tech/tech_dict/sg13g2_stdcell.json   # another base
+```
+
+* **`--emit` still hands over to step 3.** With the same base and globs, the
+  sweep's dictionary is byte-identical to step 3's, so the emitted
+  `selection.json` is a cache hit. When `--mine-exclude` differs from
+  `config.py`, the `./flow.py` commands the sweep prints carry the matching
+  `--set 'MINE_EXCLUDE=...'`. `--cell-lib` has no flow equivalent, so `--emit`
+  warns that step 3 will re-mine unless its dictionary happens to match.
+* **The survey cache is keyed on the dictionary.** `flow/explore/survey.json`
+  is reused only for the same `--max-size` *and* the same dictionary content.
+  A histogram with XOR in it is not one without.
+* **Every sweep JSON records what it mined with**, under `design.cell_lib` and
+  `design.mine_exclude`. A sweep file without those fields predates this
+  change. It mined XORs, and it read aion_flow's plain dictionary, which
+  silently drops every extension-cell instance of a netlist synthesized with
+  `PDK_EXT` on. Do not compare its numbers with a new run's. On a small grid
+  (`MAX_SIZE=2`, `MAX_OUTPUTS=1`, `MAX_INPUTS=4`, five cells) over the current
+  netlist, the budgeted estimate is 3196 µm² with XOR and 755 µm² without.
+  The difference is `AREA_FACTOR` credit for XOR patterns, the kind of saving
+  the drawn XOR cells did not deliver.
+
+`scripts/rank_functions.py` does not apply `MINE_EXCLUDE`, on purpose. It
+ranks whole functions to find the next PDK-extension cell, and XOR-heavy
+functions like xor3 are exactly what it is for.
 
 ## Step 6, and the one thing a model does here
 
@@ -413,10 +502,12 @@ beside its published views, so a `.provisional.lib` and a `.layout.v` would
 group as phantom cells under stem matching. See
 `collect_cells.PDK_EXT_VIEW_SUFFIX`.
 
-Because steps 2 and 3 mine with the extended dictionary, a mined pattern *may*
-contain an extension cell. At the default `ELITE_COUNT` none does, but a
-larger elite cut or `REWRITE_CELLS=all` can select one, and step 4's SPICE
-reference leg has no `.subckt` for it in the PDK netlist.
+Steps 2 and 3 mine with the extended dictionary, where every extension cell is
+marked `"mineable": false`. The miner keeps each one as a leaf, so no mined
+pattern contains an extension cell. `implementation/pdk_extension/README.md`
+says why it must not. With `MINE_EXCLUDE` set, the steps read a copy of that
+dictionary with the excluded PDK cells marked too (see
+[Cells the miner leaves alone](#cells-the-miner-leaves-alone)).
 
 ## Coherence
 
@@ -477,6 +568,7 @@ to manual.
 | `CELL_PREFIX` | `AION_` | 2, 3 | prefix of every generated module (the rewriter emits `_AION_` as the instance prefix). |
 | `ELITE_COUNT` | `5` | 2 | size of the elite library (`None` = keep every cell) |
 | `ELITE_METRIC` | `saved-area` | 2 | `saved-area`, `occurrences` or `saved-area-per-cell` |
+| `MINE_EXCLUDE` | `*xor*,*xnor*` | 2, 3 | comma-separated globs on cell names the miner keeps as leaves (in the netlist, never inside a mined cell). Written as `"mineable": false` into a copy of the tech dictionary, `<step>/work/tech_dict.json`. Empty mines everything. `scripts/explore_cells.py` reads it too. See [Cells the miner leaves alone](#cells-the-miner-leaves-alone). |
 | `REWRITE_CELLS` | `elite` | 3 | `elite`, `all`, or a path to a hand-curated `.v` |
 | `REWRITE_FLAT` | `False` | 3 | also emit the flattened netlist (only needed for a sequential equivalence check) |
 | `LEC_LIB` | `None` | 3 | Liberty the LEC reads. `None` picks the extended one when `PDK_EXT` is on — see below — and otherwise the tool's own default. Mapped into the container for you. |
@@ -602,6 +694,9 @@ scripts/report_html.py   the same comparison as a page (also a CLI)
 scripts/tt_precheck.py   the TinyTapeout package + signoff + precheck step 10 runs
                          (`make tt_precheck`)
 scripts/gds_to_image.py  the single-cell renderer step 6 calls
+scripts/merge_tech_dict.py  aion_opt's dictionary: extension cells spliced in
+                         (`make pdk_ext_lib`), MINE_EXCLUDE marked (steps 2, 3)
+scripts/explore_cells.py the offline sweep of the step-2/3 knobs (not a step)
 ```
 
 ## Troubleshooting
@@ -620,7 +715,9 @@ flow points it at `flow/pdk_extension/lib/`, which has the extension cells;
 
 **Step 3 fails with "the rewrite substituted nothing"** — the mining knobs in
 step 3 must match step 2's exactly, or the selection cache's fingerprint stops
-matching and a different cover is mined. If you curated the library by hand,
+matching and a different cover is mined. That includes `MINE_EXCLUDE`: it
+changes the dictionary, and the dictionary's content is part of the
+fingerprint. If you curated the library by hand,
 check the `// AION canonical_key:` comments are still attached to their
 modules.
 

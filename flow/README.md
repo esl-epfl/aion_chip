@@ -30,6 +30,8 @@ logs/<step>/            one file per command the handler ran   (git-ignored)
 pnr_simple/             the PDK-only baseline            (git-ignored)
                         not a step -- `make pnr_simple` builds it, and
                         step 9 is the only thing that reads it
+explore/                scripts/explore_cells.py's sweeps, survey cache and
+                        --emit directories; not a step    (git-ignored)
 pdk_extension/          the extended standard-cell Liberty and the
                         PDK-extension cells' working files (git-ignored)
                         `lib/` is what step 1 maps against -- built by
@@ -107,7 +109,10 @@ Steps 2 to 6 are the AION-specific half:
 ```
 2_pattern_extraction/  aion_cells.v  aion_cells_elite.v
                        work/selection.json  report/pattern_report.json
+                       work/tech_dict.json   the dictionary it mined with
+                                             (MINE_EXCLUDE marked)
 3_rewrite/             nl/{aion_cells.v, tt_um_aion.nl.v}
+                       work/tech_dict.json   the same, re-derived
                        report/rewrite_report.{json,md,html}
 4_characterization/    steps/aion_char/tb/{sv,spice}/  gold_functions.md
                        steps/aion_char/tb/spice/reference_cells.spice

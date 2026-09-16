@@ -51,6 +51,10 @@ PDK_EXT_DIR = IMPL_DIR / "pdk_extension"
 PDK_EXT_LIB_DIR = FLOW_DIR / "pdk_extension" / "lib"
 PDK_EXT_DICT_DIR = FLOW_DIR / "pdk_extension" / "tech_dict"
 
+# aion_opt's own technology dictionary, the PDK cells only -- the Makefile's
+# CELL_LIB default, and what MINE_EXCLUDE is applied to when PDK_EXT is off.
+AION_OPT_TECH_DICT = AION_FLOW / "tech" / "tech_dict" / "sg13g2_stdcell.json"
+
 # The corner the extension cells are characterized at.  kepler-formal links a
 # netlist against a single Liberty and only reads the cells' functions out of
 # it, so which corner it is does not change the verdict -- but a file that is

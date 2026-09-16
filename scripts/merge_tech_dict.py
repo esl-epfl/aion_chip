@@ -14,6 +14,9 @@
 #                          "pins": {<pin>: "input"|"output"},
 #                          "function": "<liberty expression>"}}}
 #
+#  Every extension cell is written with "mineable": false as well, so the
+#  miner keeps it a leaf: in the netlist, never inside a mined pattern.
+#
 #  and that file is load-bearing in a way its name does not suggest.
 #  `load_yosys_json()` drops any instance whose cell type is not in it:
 #
@@ -45,6 +48,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -105,9 +109,55 @@ def merge(base: dict, lib_text: str) -> "tuple[dict, list[str]]":
     for name, text in cell_blocks(lib_text):
         if name in cells:
             continue
-        cells[name] = entry(text)
+        # A leaf, never part of a mined pattern: step 5 would rebuild the
+        # pattern from its function as static CMOS, throwing away the very
+        # design the cell exists for (AION_mux2i's transmission gates), and
+        # step 6 has no PDK layout to abut it from.  aion_opt keeps it in the
+        # netlist the way it keeps a flip-flop.
+        cells[name] = {**entry(text), "mineable": False}
         added.append(name)
     return merged, added
+
+
+def exclude(base: dict, patterns) -> "tuple[dict, list[str]]":
+    """Mark every cell whose name matches a glob in `patterns` a leaf.
+
+    The same `"mineable": false` merge() gives the extension cells, for PDK
+    cells the miner should leave alone -- step 2's MINE_EXCLUDE.  Matching is
+    on the concrete name (`sg13g2_xor2_1`), and every drive strength that
+    matches is marked, because aion_opt folds strengths onto one key and takes
+    the entry of whichever variant is smallest.
+    """
+    marked = json.loads(json.dumps(base))
+    cells = marked.get("cells", marked)
+    matched = sorted(name for name in cells
+                     if any(fnmatch.fnmatchcase(name, p) for p in patterns))
+    for name in matched:
+        cells[name]["mineable"] = False
+    return marked, matched
+
+
+def exclude_patterns(text: str) -> "list[str]":
+    """MINE_EXCLUDE's comma-separated globs; an empty string is none."""
+    return [p.strip() for p in text.split(",") if p.strip()]
+
+
+def write_excluded(source: Path, patterns, out: Path) -> "tuple[list[str], list[str]]":
+    """Write `source` with `patterns` excluded to `out`: (matched, unmatched).
+
+    Steps 2 and 3 and scripts/explore_cells.py all write their copy through
+    here, so equal inputs give byte-equal files -- aion_opt fingerprints a
+    selection by the dictionary's content, and a sweep's `--emit` is only a
+    cache hit in step 3 if the two agree to the byte.  `unmatched` is the
+    patterns that matched no cell, which is usually a typo.
+    """
+    marked, matched = exclude(json.loads(source.read_text(encoding="utf-8")),
+                              patterns)
+    unmatched = [p for p in patterns
+                 if not any(fnmatch.fnmatchcase(name, p) for name in matched)]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(marked, indent=2) + "\n", encoding="utf-8")
+    return matched, unmatched
 
 
 def main(argv=None) -> int:

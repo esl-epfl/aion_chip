@@ -13,7 +13,7 @@ name: epfl:aion:pdk_extension_cells:1.0.0
 description: |
   Verilog models of the hand-designed cells under
   implementation/pdk_extension/ that have been drawn and published.
-  Currently: 2 drawn cell(s): AION_mux2i_1, AION_mux2i_2.
+  Currently: 3 drawn cell(s): AION_maj3i_1, AION_mux2i_1, AION_mux4i_1.
 
   Not the same views as epfl:aion:pdk_extension:1.0.0, which carries each
   cell's structural `<CELL>.v` gold reference for the post-synthesis
@@ -26,8 +26,9 @@ description: |
 filesets:
   models:
     files:
+      - AION_maj3i_1/AION_maj3i_1.layout.v
       - AION_mux2i_1/AION_mux2i_1.layout.v
-      - AION_mux2i_2/AION_mux2i_2.layout.v
+      - AION_mux4i_1/AION_mux4i_1.layout.v
     file_type: verilogSource
 
 targets:

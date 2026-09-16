@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import cell_registry
+import merge_tech_dict
 
 from .. import paths, pdk_ext
 from ..config import Config, optional
@@ -35,7 +37,7 @@ def mining_vars(cfg: Config) -> list:
     ]
 
 
-def cell_lib_vars(ctx: Context) -> list:
+def cell_lib_vars(ctx: Context, workdir: Path) -> list:
     """CELL_LIB for aion_opt, and it belongs beside the mining knobs.
 
     aion_opt's technology dictionary is not just a table of areas: it is the
@@ -47,8 +49,34 @@ def cell_lib_vars(ctx: Context) -> list:
     Both steps call this for the same reason they share `mining_vars`: a miner
     and a rewriter that disagree about what the technology holds do not mine
     the same cover, and here they would not even see the same netlist.
+
+    The extension cells are in that dictionary marked `"mineable": false`, so
+    the miner keeps them as leaves -- in the netlist, never inside a mined
+    cell (scripts/merge_tech_dict.py says why).
+
+    MINE_EXCLUDE marks PDK cells the same way, in a copy of that dictionary
+    written to `workdir` -- each step its own, derived from the config the way
+    `mining_vars` is.  aion_opt fingerprints the selection cache by the
+    dictionary's content, so the two copies agree exactly when the two steps'
+    MINE_EXCLUDE do.
     """
-    return optional("CELL_LIB", pdk_ext.views(ctx).tech_dict)
+    base = pdk_ext.views(ctx).tech_dict
+    patterns = merge_tech_dict.exclude_patterns(ctx.cfg.MINE_EXCLUDE)
+    if not patterns:
+        return optional("CELL_LIB", base)
+
+    source = base or paths.AION_OPT_TECH_DICT
+    derived = workdir / "tech_dict.json"
+    if ctx.runner.dry_run:
+        return [f"CELL_LIB={derived}"]
+
+    matched, unmatched = merge_tech_dict.write_excluded(source, patterns, derived)
+    if unmatched:
+        warn(f"MINE_EXCLUDE: {', '.join(unmatched)} matches no cell in "
+             f"{paths.rel_to_project(source)}")
+    info(f"mining keeps {len(matched)} cell(s) as leaves (MINE_EXCLUDE): "
+         f"{', '.join(matched) or '—'}")
+    return [f"CELL_LIB={derived}"]
 
 
 class PatternExtractionStep(Step):
@@ -98,7 +126,7 @@ class PatternExtractionStep(Step):
                 f"INPUT={netlist}",
                 f"TOP={cfg.TOP}",
                 *mining_vars(cfg),
-                *cell_lib_vars(ctx),
+                *cell_lib_vars(ctx, self.outdir / "work"),
                 f"ELITE_METRIC={cfg.ELITE_METRIC}",
                 *optional("ELITE_COUNT", cfg.ELITE_COUNT),
                 f"CELLS={self.cells}",

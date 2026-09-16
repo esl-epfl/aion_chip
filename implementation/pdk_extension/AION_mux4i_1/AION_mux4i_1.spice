@@ -1,0 +1,63 @@
+* ================================================================
+*  SPDX-FileCopyrightText:    2026 Filippo Quadri
+*  SPDX-License-Identifier:   Apache-2.0 WITH SHL-2.1
+*  Description:               AION_mux4i_1 -- transmission-gate 4:1 mux
+*
+*  FIRST DRAFT.  Not yet through `pdk_cell.py --only characterize`.
+*
+*  An INVERTING 4:1 multiplexer in 18 devices, against the 26 of
+*  sg13g2_mux4_1 + the 2 of sg13g2_inv_1.
+*
+*      O0 = !(I5 ? (I4 ? I3 : I2) : (I4 ? I1 : I0))
+*
+*  AION_mux2i_1 one level deeper, with the same reasoning.  Two select
+*  inverters make I4b and I5b.  Transmission-gate pair TA, steered by I4,
+*  picks I0 or I1 onto nA, and TB picks I2 or I3 onto nB.  TC, steered by I5,
+*  picks nA or nB onto m, and one restoring inverter drives O0 = !m.  A
+*  data input therefore reaches m through two TGs in series, and the
+*  inverter is what bounds that to a fixed internal load.
+*
+*  Data inputs I0..I3 land on source/drain, exactly as AION_mux2i_1's do,
+*  so characterize with a real driver:
+*
+*      scripts/pdk_cell.py AION_mux4i_1 --driver-cell sg13g2_buf_2
+*
+*  FLOORPLAN.md places these devices in 17 sites, column order
+*
+*      TB | INV(I4) | TA | TC | INV(I5)+OUT
+*
+*  with the minimum four diffusion breaks, each 120 nm wider than the rule.
+*  No 16-site order routed: the two that were tried at 16 (one of them
+*  with the fewest nets across any vertical line) ran out of row crossings.
+*
+*  Single fingers at the library's own widths (nmos 740 nm, pmos 1120 nm)
+*  so both rows are unbroken-height strips; ad/as/pd/ps from sg13g2_inv_1.
+*
+*  Port order matches the AION convention that aion_layout's LVS reads:
+*      I0 = A0   I1 = A1   I2 = A2   I3 = A3   I4 = S0   I5 = S1   O0 = !X
+* ================================================================
+.subckt AION_mux4i_1 I0 I1 I2 I3 I4 I5 O0 VDD VSS
+* ---- select inverters:  I5b = !I5,  I4b = !I4 -------------------------
+XP0 I5b I5  VDD VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XN0 I5b I5  VSS VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP1 I4b I4  VDD VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XN1 I4b I4  VSS VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+* ---- TA: I4 = 0 steers I0 onto nA, I4 = 1 steers I1 --------------------
+XN2 nA  I4b I0  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP2 nA  I4  I0  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XN3 nA  I4  I1  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP3 nA  I4b I1  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+* ---- TC: I5 = 0 steers nA onto m, I5 = 1 steers nB ---------------------
+XN4 m   I5b nA  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP4 m   I5  nA  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XN5 m   I5  nB  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP5 m   I5b nB  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+* ---- TB: I4 = 0 steers I2 onto nB, I4 = 1 steers I3 --------------------
+XN6 nB  I4b I2  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP6 nB  I4  I2  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XN7 nB  I4  I3  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XP7 nB  I4b I3  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+* ---- restoring output stage:  O0 = !m ---------------------------------
+XP8 O0  m   VDD VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XN8 O0  m   VSS VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+.ends

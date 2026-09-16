@@ -60,8 +60,17 @@
 #                   channel for the whole transition.  Pass a real cell and
 #                   both sides of the comparison are measured against it.
 #
+#    publish        (only with --only) copy the views the last post-layout
+#                   run exported, without running any of it again.
+#
 #  Nothing is published until the layout verifies, and the verdict is this
-#  script's own `verify`, never a claim made anywhere else.
+#  script's own `verify`, never a claim made anywhere else.  Nor is a cell
+#  that loses the comparison: `aion_layout` calls a cell a WIN only when it is
+#  smaller AND its worst arc is faster.  --accept-delay-loss PCT is the one
+#  exception, and it is said out loud: a cell that is smaller and at most PCT%
+#  slower on its worst arc is published anyway.  `--only publish` applies it
+#  to a run that already finished, because characterization is the hour and
+#  the verdict is the last line of it.
 # ================================================================
 
 from __future__ import annotations
@@ -69,6 +78,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -107,6 +117,10 @@ CONTAINER_ROOT = "/foss/designs/aion_chip"
 CONTAINER_AION_FLOW = f"{CONTAINER_ROOT}/aion_flow"
 
 STAGES = ("characterize", "layout", "post-layout")
+#: Not a step `--from` walks through: `--only publish` copies what a finished
+#: post-layout run exported, and re-reads that run's verdict to decide whether
+#: it may.
+PUBLISH = "publish"
 DRAW_MODES = ("auto", "manual")
 
 #: Parasitic extraction mode for every cell in this directory: 2, C-coupled.
@@ -803,6 +817,7 @@ def stage_post_layout(
     jobs: int,
     driver: Driver | None = None,
     pex_mode: int = PEX_MODE_DEFAULT,
+    accept_delay_loss: float | None = None,
 ) -> int:
     """PEX, the abutted PDK baseline, Liberty, the comparison and the export.
 
@@ -852,12 +867,122 @@ def stage_post_layout(
     if run.dry_run:
         info("dry run: nothing was extracted, characterized or published")
         return 0
-    if not result.ok:
-        fail("the mechanical chain failed")
+    return _publish_if_allowed(cell, result.output, accept_delay_loss,
+                               chain_ok=result.ok)
+
+
+def stage_publish(cell: Cell, run: Runner, accept_delay_loss: float | None) -> int:
+    """Publish what the last post-layout run exported, without re-running it.
+
+    Characterization is the hour of this script and the comparison is its
+    last line, so a cell that finished and lost is the case this exists for:
+    re-read that run's own output -- the flow log `Runner` wrote, overwritten
+    by every run, so it is always the latest -- and publish if the verdict
+    allows it now.  The views it copies are the ones that same run exported;
+    `_publish_views` re-grades them exactly as post-layout would.
+    """
+    head(f"publish  {cell.name}")
+    log = run.log_dir / f"{cell.name}.flow.log"
+    if not log.exists():
+        fail(
+            f"no post-layout run to publish: {log.relative_to(PROJECT_ROOT)} "
+            f"does not exist"
+        )
+        info(f"run it first:  scripts/pdk_cell.py {cell.name} --from post-layout")
         return 1
-    verdict = result.verdict("RESULT:")
-    if verdict and verdict != "RESULT: PASS":
-        fail(f"the mechanical chain re-graded the cell {verdict}")
+    info(f"verdict from {log.relative_to(PROJECT_ROOT)}")
+    if run.dry_run:
+        info("dry run: nothing was published")
+        return 0
+    return _publish_if_allowed(cell, log.read_text(), accept_delay_loss,
+                               chain_ok=None)
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """The `COMPARE:` line `aion_layout flow` ends on."""
+
+    verdict: str      # "WIN" or "LOSS"
+    area_pct: float   # negative is smaller
+    delay_pct: float  # worst arc; positive is slower
+
+
+_COMPARE_LINE = re.compile(
+    r"^COMPARE:\s+(?P<verdict>WIN|LOSS)\s+area\s+(?P<area>[+-]?\d+(?:\.\d+)?)%"
+    r".*?worst delay\s+(?P<delay>[+-]?\d+(?:\.\d+)?)%",
+    re.MULTILINE,
+)
+
+
+def read_comparison(output: str) -> Comparison | None:
+    """The last column-0 `COMPARE:` line, or None when the chain never got there."""
+    matches = list(_COMPARE_LINE.finditer(output))
+    if not matches:
+        return None
+    last = matches[-1]
+    return Comparison(last["verdict"], float(last["area"]), float(last["delay"]))
+
+
+def may_publish(output: str, accept_delay_loss: float | None) -> tuple[bool, bool, str]:
+    """Whether a post-layout run's output lets its views be published.
+
+    Returns ``(allowed, accepted_loss, reason)``.  A WIN is allowed.  A LOSS
+    is allowed only with ``accept_delay_loss`` set, only when the cell is
+    smaller, and only when its worst arc is at most that many percent slower
+    -- read, like the verdict, from the line the comparison printed, so it is
+    the same rounding a reader of the log sees.  A cell that is not smaller
+    never qualifies: area is the only reason these cells exist.  Neither does
+    a run whose layout re-graded as anything but PASS, or one that never
+    reached the comparison.
+    """
+    results = [line.strip() for line in output.splitlines()
+               if line.strip().startswith("RESULT:")]
+    if results and results[-1] != "RESULT: PASS":
+        return False, False, f"the mechanical chain re-graded the cell {results[-1]}"
+    comparison = read_comparison(output)
+    if comparison is None:
+        return False, False, "the mechanical chain failed before the comparison"
+    if comparison.verdict == "WIN":
+        return True, False, "COMPARE: WIN"
+    summary = (f"area {comparison.area_pct:+.1f}%, "
+               f"worst delay {comparison.delay_pct:+.1f}%")
+    if comparison.area_pct >= 0:
+        return False, False, f"COMPARE: LOSS and not smaller ({summary})"
+    if accept_delay_loss is None:
+        return False, False, f"COMPARE: LOSS ({summary})"
+    if comparison.delay_pct > accept_delay_loss:
+        return False, False, (f"COMPARE: LOSS ({summary}), beyond "
+                              f"--accept-delay-loss {accept_delay_loss:g}")
+    return True, True, (f"COMPARE: LOSS ACCEPTED ({summary}, within "
+                        f"--accept-delay-loss {accept_delay_loss:g})")
+
+
+def _publish_if_allowed(cell: Cell, output: str, accept_delay_loss: float | None,
+                        chain_ok: bool | None) -> int:
+    """The verdict gate shared by post-layout and `--only publish`."""
+    allowed, accepted, reason = may_publish(output, accept_delay_loss)
+    if not allowed:
+        fail(f"not published: {reason}")
+        if reason.startswith("COMPARE: LOSS ("):
+            info(
+                f"the views are exported and graded; to publish them without "
+                f"running characterization again:"
+            )
+            info(
+                f"  scripts/pdk_cell.py {cell.name} --only publish "
+                f"--accept-delay-loss <PCT>"
+            )
+            info(f"  see {(cell.build / 'layout' / f'{cell.name}.compare.md').relative_to(PROJECT_ROOT)}")
+        return 1
+    if accepted:
+        warn(reason)
+        warn(
+            "this cell is published SLOWER than the PDK cells it replaces on "
+            "its worst arc; the Liberty says so, and STA will see it"
+        )
+    elif chain_ok is False:
+        # A WIN line with a failed chain would be a tool bug, not a verdict.
+        fail("the mechanical chain failed after printing COMPARE: WIN")
         return 1
     if not _publish_views(cell):
         return 1
@@ -1041,7 +1166,8 @@ def main(argv=None) -> int:
         "  scripts/pdk_cell.py AION_mux2i_1 --from layout\n"
         "  scripts/pdk_cell.py AION_mux2i_1 --only characterize\n"
         "  scripts/pdk_cell.py AION_mux2i_1 --from layout --draw manual\n"
-        "  scripts/pdk_cell.py AION_mux4i_1 --driver-cell sg13g2_buf_2\n",
+        "  scripts/pdk_cell.py AION_mux4i_1 --driver-cell sg13g2_buf_2\n"
+        "  scripts/pdk_cell.py AION_maj3i_1 --only publish --accept-delay-loss 5\n",
     )
     parser.add_argument("cell", help="cell name, e.g. AION_mux2i_1")
     parser.add_argument(
@@ -1051,7 +1177,20 @@ def main(argv=None) -> int:
         default="characterize",
         help="first stage to run",
     )
-    parser.add_argument("--only", choices=STAGES, help="run exactly one stage")
+    parser.add_argument(
+        "--only",
+        choices=STAGES + (PUBLISH,),
+        help="run exactly one stage; 'publish' copies the views of the last "
+        "post-layout run without running it again",
+    )
+    parser.add_argument(
+        "--accept-delay-loss",
+        type=float,
+        metavar="PCT",
+        help="publish a cell that loses the comparison on delay alone: smaller "
+        "than the baseline, worst arc at most PCT%% slower (as the COMPARE: line "
+        "prints it). Post-layout and publish stages",
+    )
     parser.add_argument(
         "--draw",
         choices=DRAW_MODES,
@@ -1070,7 +1209,7 @@ def main(argv=None) -> int:
         "--draw-timeout",
         type=int,
         default=8400,
-        help="seconds per agent turn (default: 3600)",
+        help="seconds per agent turn (default: 8400)",
     )
     parser.add_argument(
         "--model",
@@ -1081,7 +1220,7 @@ def main(argv=None) -> int:
         "--effort",
         default="max",
         choices=("low", "medium", "high", "xhigh", "max", "none"),
-        help="how hard it thinks per turn (default: low)",
+        help="how hard it thinks per turn (default: max)",
     )
     parser.add_argument(
         "--no-stream",
@@ -1140,6 +1279,8 @@ def main(argv=None) -> int:
         help="do not echo tool output; it still goes to flow/logs/pdk_extension/",
     )
     args = parser.parse_args(argv)
+    if args.accept_delay_loss is not None and args.accept_delay_loss < 0:
+        parser.error("--accept-delay-loss is a percentage slower, and must be >= 0")
 
     cell = Cell(args.cell)
     cell.require_sources()
@@ -1158,7 +1299,9 @@ def main(argv=None) -> int:
         stream=not args.no_stream,
     )
 
-    if not args.dry_run and not container_running():
+    # Publishing copies files and grades a LEF on the host; nothing in it needs
+    # the container, and refusing to publish for want of one would be absurd.
+    if not args.dry_run and args.only != PUBLISH and not container_running():
         raise SystemExit(
             "error: the IIC-OSIC-TOOLS container is not running — every stage "
             "here needs ngspice, magic, netgen or klayout.\n"
@@ -1188,6 +1331,11 @@ def main(argv=None) -> int:
             "stimulus   "
             + (driver.describe() if driver else "ideal ramp (no --driver-cell)")
         )
+    if args.accept_delay_loss is not None and (
+        "post-layout" in todo or PUBLISH in todo
+    ):
+        info(f"accepting  a worst-arc delay loss up to {args.accept_delay_loss:g}% "
+             f"on a smaller cell")
     if "layout" in todo:
         info(
             f"draw       {draw.mode}"
@@ -1203,9 +1351,12 @@ def main(argv=None) -> int:
             code = stage_characterize(cell, run)
         elif stage == "layout":
             code = stage_layout(cell, run, args.jobs, draw)
+        elif stage == PUBLISH:
+            code = stage_publish(cell, run, args.accept_delay_loss)
         else:
             code = stage_post_layout(
-                cell, run, args.corners, args.jobs, driver, args.pex_mode
+                cell, run, args.corners, args.jobs, driver, args.pex_mode,
+                args.accept_delay_loss,
             )
         if code == 2:
             # "not drawn yet" is a stopping point, not a failure: the layout

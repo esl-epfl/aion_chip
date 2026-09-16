@@ -53,7 +53,7 @@ class Config:
     # (scripts/merge_lib.py) and points CELL_LIBS at it. Set False to
     # synthesize against the plain PDK library; the PDK-only baseline
     # `make pnr_simple` builds is never affected either way.
-    PDK_EXT: bool = False
+    PDK_EXT: bool = True
 
     # =====================================================================
     # 2_pattern_extraction   (aion_opt mining)
@@ -70,16 +70,22 @@ class Config:
     #                     cell -- which is almost never what you want, since
     #                     every kept cell has to be drawn by hand in step 6)
     # ELITE_METRIC        saved-area | occurrences | saved-area-per-cell
+    # MINE_EXCLUDE        comma-separated globs on cell names the miner keeps
+    #                     as leaves: in the netlist, never inside a mined
+    #                     cell.  XOR/XNOR by default -- a drawn XOR pair is
+    #                     no narrower than the two PDK cells it replaces.
+    #                     Empty ("--set MINE_EXCLUDE=") mines everything.
     MAX_SIZE: int = 2
     MIN_OCCURRENCES: int = 2
-    MIN_SELECTED: int | None = 24
+    MIN_SELECTED: int | None = 1
     AREA_FACTOR: float = 0.85
     MAX_OUTPUTS: int | None = 2
-    MAX_INPUTS: int | None = 5
+    MAX_INPUTS: int | None = 4
     JOBS: int | None = None
     CELL_PREFIX: str = "AION_"
-    ELITE_COUNT: int | None = 10
+    ELITE_COUNT: int | None = 15
     ELITE_METRIC: str = "saved-area"
+    MINE_EXCLUDE: str = "*xor*,*xnor*,*mux*"
 
     # =====================================================================
     # 3_rewrite

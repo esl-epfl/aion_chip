@@ -15,14 +15,23 @@ functions static CMOS is worst at.
 |---|---|---|---|---|---|
 | `AION_mux2i_1` | `!(S ? A1 : A0)` | 8 | 7 | `mux2_1` + `inv_1`, 13 | 46% |
 | `AION_mux2i_2` | same, drive 2 | 8 | 8 | `mux2_1` + `inv_2`, 14 | 43% |
-| `AION_mux4i_1` | `!(4:1 mux)` | 18 | 16 | `mux4_1` + `inv_1`, 24 | 33% |
+| `AION_mux4i_1` | `!(4:1 mux)` | 18 | 17 | `mux4_1` + `inv_1`, 24 | 29% |
+| `AION_xor3_1` | `A ^ B ^ C` | 18 | 15 | `xor2_1` + `xor2_1`, 16 | 6% |
+| `AION_xnor3_1` | `!(A ^ B ^ C)` | 18 | 15 | `xor2_1` + `xnor2_1`, 16 | 6% |
+| `AION_maj3i_1` | `!maj(A, B, C)` | 10 | 7 | `or2_1` + `a22oi_1`, 11 | 36% |
 
-All three are inverting, and not by accident: a transmission gate steers its
-input straight through, so the restoring stage that makes the cell modelable
-is necessarily an inverter and a second one to undo the polarity costs
-CoreSites for nothing electrical. The PDK has no inverting mux at any width,
-so each of these competes with a PDK mux *plus* an inverter — which is what
-the mapper builds today when the surrounding logic wants the complement.
+The muxes are all inverting, and not by accident: a transmission gate steers
+its input straight through, so the restoring stage that makes the cell
+modelable is necessarily an inverter and a second one to undo the polarity
+costs CoreSites for nothing electrical. The PDK has no inverting mux at any
+width, so each of these competes with a PDK mux *plus* an inverter — which is
+what the mapper builds today when the surrounding logic wants the complement.
+
+The three full-adder cells came out of `scripts/rank_functions.py` (below).
+XOR3/XNOR3 use one transmission-gate pair on their fast input and keep every
+input pin on a transistor gate; MAJ3I is plain static CMOS the PDK does not
+ship. On its own XOR3 buys one site. What it buys with MAJ3I is the adder:
+the pair replaces a median 26 sites of PDK cells with 15 + 7.
 
 Until `post-layout` publishes a measured `.lib`, sites are the floorplan
 estimate in each cell's `FLOORPLAN.md`, and that is the number ABC chooses on.
@@ -57,6 +66,133 @@ those are the design. Its own model is published as `<CELL>.layout.v`, and
 its copy of the netlist is not published at all, because the source is the
 view.
 
+## Finding the next one
+
+`scripts/rank_functions.py` ranks the Boolean functions the synthesized
+netlist builds out of **several** PDK cells — the candidates for a cell in
+this directory.
+
+It exists because step 2's miner cannot answer that question. The miner is
+structural: a pattern is a set of cell types wired pin to pin, and the cell it
+generates gets one port per *pin*. A function that the netlist spreads over a
+shared net, or builds in several structural variants, never shows up as one
+pattern. Majority is the worked example. In the PDK-only `tt_um_aion`:
+
+- 640 gates compute a majority of three signals.
+- 616 of them share the half-sum XOR with the full adder's sum, so the miner
+  has to cut there and sees the carry as a 4-input function.
+- The full-adder shapes it could mine at `MAX_OUTPUTS=2` spread over 82
+  canonical keys.
+- `a` and `b` reach two pins each, so a mined cell is a 6-input function and
+  never `maj(a, b, c)`.
+
+Yet ABC mapped `AION_maj3i_1` 745 times the moment the cell existed.
+
+The script does what ABC does:
+
+1. Enumerate every gate's cuts of up to `-k` inputs (default 3, at most 4).
+2. Compute the truth table over each cut's leaves.
+3. Group the functions by **NPN class**: the same function up to input
+   order, input polarity and output polarity.
+4. Price each occurrence by the area one cell of that function would free,
+   which is the root's fanout-free cone inside the cut.
+
+It runs on the host in about a second (two at `-k 4`), with no container,
+reading the netlist through the same yosys-JSON loader `explore_cells.py`
+uses.
+
+```bash
+scripts/rank_functions.py                                 # flow/1_synth's netlist, 3-input functions
+scripts/rank_functions.py --new-only --explain 3          # hide what the library has, detail the top 3
+scripts/rank_functions.py -k 4 --rows 40 --json flow/explore/functions.json
+scripts/rank_functions.py --cell-lib aion_flow/tech/tech_dict/sg13g2_stdcell.json   # PDK-only view
+```
+
+### Reading the first table: one cell per function
+
+```
+  #  function                     in  sites shared  freed um2  %comb med freed med cone  lib
+  1  AION_maj3i                    3    595     43     11,209  10.8%      10.0     18.0  yes
+  3  a!c + b!c + !a!bc             3    240    800      5,057   4.9%      12.0     13.0  -
+  5  AION_xnor3/AION_xor3          3     99   1460      2,609   2.5%      16.0     16.0  yes
+```
+
+| column | meaning |
+|---|---|
+| `function` | the library cells already in the class, a name (`XOR3`, `MAJ3`), or the most common exact variant as a sum of products over `a b c d` |
+| `sites` | occurrences where one cell frees **more than the root gate it replaces**. Only there can a single-output cell win |
+| `shared` | the cone spans several cells, but everything below the root is read elsewhere too, so replacing the root frees only the root |
+| `freed um2` | area removed at `sites`, **before** paying for the new cell. `%comb` is against the netlist's combinational area |
+| `med freed` | median sites freed per occurrence. **A new cell pays where it is narrower than this** — it is the layout budget |
+| `med cone` | median width of all the logic between the leaves and the root |
+| `lib` | a dictionary cell already implements the class: a PDK cell the mapper passed over (polarity, delay), or an extension cell already here |
+
+`shared` much larger than `sites` means the function lives inside something
+bigger. XOR3 above is the full adder's sum: its inner XOR also feeds the carry,
+so an XOR3 cell alone frees one gate.
+
+### Reading the second table: two cells on the same leaves
+
+```
+  #  functions on the same leaves                sites  freed um2  %comb med freed med cone
+  1  AION_maj3i + AION_xnor3/AION_xor3             563     26,904  26.0%      26.0     26.0
+```
+
+Two classes computed on the same three nets, priced as one joint replacement.
+A pair counts where the two roots together free at least one cell besides
+themselves, once per pair of roots. XOR3 + MAJ3 is the full adder, and it is
+the largest opportunity in the design: the pair frees a median 26 sites and
+the two provisional cells cost 14 + 7. ABC needs nothing for this — it picks
+each cell independently wherever it pays, and in the trial synthesis 506
+XOR3/XNOR3 cells sat on exactly the same nets as a MAJ3I.
+
+### `--explain N`
+
+For each of the top N rows:
+
+- the three most common exact functions;
+- the cone shapes, as freed cells / whole cone (`a21oi+nor2 / a21oi+nor2+xor2`);
+- **which cells read a net inside the cone**, which is how a shared half-sum XOR
+  shows up as `387 xnor2`;
+- which other classes sit on the same leaves.
+
+`--json` writes all of it, pairs included, for scripting.
+
+### From a row to a cell
+
+1. Pick a class whose `med freed` leaves room for a cell (or a pair whose
+   joint `med freed` does), and the exact variant `--explain` says is most
+   common.
+2. Create `<CELL>/` here with `<CELL>.v` (the cheapest PDK cells computing it),
+   `<CELL>.spice` and `<CELL>.provisional.lib` whose `area` is your estimate.
+   Add the `.v` to `pdk_extension.core`.
+3. Try it in synthesis before drawing anything:
+   `make synth MERGE_LIB_ARGS=--provisional SYNTH_OUT_DIR=flow/explore/synth_<name>`.
+   Sweep the provisional `area`: the widest cell ABC still uses is the layout
+   budget.
+4. Write `FLOORPLAN.md` and run `make pdk_cell_generation CELL_NAME=<CELL>`
+   (below).
+
+### What it does not tell you
+
+- **Rows are not additive.** One gate has cuts in several classes.
+- **A multi-output function is not a class**; it shows up only as a pair.
+- **`freed` is an upper bound.** It ignores the cell's own area, delay, and the
+  restructuring ABC does once the cell exists (ABC placed 745 MAJ3I where the
+  netlist structurally holds 638).
+- **The default dictionary** is `flow/pdk_extension/tech_dict/sg13g2_stdcell_aion.json`
+  when `make pdk_ext_lib` has written it. It contains every extension cell,
+  provisional ones included, so those classes read `lib: yes` and `--new-only`
+  hides them.
+
+Its tests build a full adder from PDK cells in memory and check that the carry
+is found as a merging MAJ3, the sum as a shared XOR3, and the pair as freeing
+all five gates:
+
+```bash
+python3 -m pytest scripts/tests/test_rank_functions.py -q
+```
+
 ## Building one
 
 ```bash
@@ -72,6 +208,42 @@ make pdk_ext_lib                                                               #
 `--driver-cell sg13g2_buf_2` (see below; `PDK_CELL_DRIVER=` goes back to the
 ideal ramp), and anything in `PDK_CELL_ARGS` after it. The script can also be
 called directly with the same arguments.
+
+### When the comparison says LOSS
+
+`aion_layout` calls a cell a WIN only when it is **smaller and** its worst arc
+is **faster** than the abutted PDK cells, and nothing that loses is published.
+`post-layout` then ends with `not published: COMPARE: LOSS (...)`, even though
+every graded step passed and the views sit exported in
+`flow/pdk_extension/<CELL>/layout/final/`.
+
+A cell that loses on delay alone can still be worth having. `AION_maj3i_1` is
+36% smaller with a 3.3% slower worst arc, while its falling arcs are up to 11%
+faster. `--accept-delay-loss PCT` publishes such a cell when it is smaller and
+its worst arc is at most `PCT`% slower, as the `COMPARE:` line prints it. It
+never publishes a cell that is not smaller, or one whose layout re-graded as
+anything but PASS.
+
+Characterization is most of the run, so the flag also works on a run that
+already finished. `--only publish` re-reads the last post-layout run's verdict
+from `flow/logs/pdk_extension/<CELL>.flow.log` and publishes that run's views.
+It takes seconds, runs no tool, and needs no container:
+
+```bash
+make pdk_cell_generation CELL_NAME=AION_maj3i_1 PDK_CELL_ARGS="--only publish --accept-delay-loss 5"
+make pdk_cell_generation CELL_NAME=AION_maj3i_1 PDK_CELL_ARGS="--from post-layout --accept-delay-loss 5"
+make pdk_ext_lib
+```
+
+The first line publishes the finished run; the second decides at the end of a
+fresh one. An accepted loss is printed as a warning and not hidden anywhere
+else: the published Liberty carries the measured, slower arc, so STA and the
+mapper both see it.
+
+Characterization time scales with corners and parallel jobs. `--corners typ`
+measures one corner instead of three, and publishes a single `<CELL>.lib` that
+every STA corner reads alike. `--jobs N` (default 8) sets how many ngspice runs
+go in parallel.
 
 The three stages apply the checks step 6 applies to the mined cells:
 
@@ -277,6 +449,25 @@ agree with:
 flow/pdk_extension/lib/sg13g2_stdcell_aion_<corner>.lib   ABC, OpenSTA, the LEC
 flow/pdk_extension/tech_dict/sg13g2_stdcell_aion.json     aion_opt
 ```
+
+Every extension cell goes into that dictionary with `"mineable": false`, and
+aion_opt builds its mining graph only from mineable cells. So the miner keeps
+an extension cell the way it keeps a flip-flop: in the netlist, its pins a
+pattern boundary, never *inside* a mined cell. Without it, step 2 mined
+`AION_mux2i_0` (two `AION_mux2i_1`) and `AION_mux2i_sg13g2_mux2_6`, and the
+flow broke at step 4, whose gold models come from the plain PDK library. It
+would have been wrong even with that fixed: step 5 rebuilds every mined cell
+from its function as one static-CMOS stack, which throws away the
+transmission gates the cell exists for, and step 6 has no PDK layout to abut
+it into a baseline. A mined name like `AION_mux2i_<rank>` could also have
+collided with the extension cell's own.
+
+The same mark keeps chosen *PDK* cells out of mining. `MINE_EXCLUDE`
+(default `*xor*,*xnor*`) makes steps 2 and 3, and `scripts/explore_cells.py`,
+mine against a copy of this dictionary with the matching cells marked too.
+A mined XOR pair is no narrower than the two PDK cells it replaces, so XOR
+area is left to cells designed here. See "Cells the miner leaves alone" in
+`scripts/flow/README.md`.
 
 ```bash
 scripts/merge_tech_dict.py                      # just the dictionary

@@ -25,8 +25,9 @@ description: |
 filesets:
   models:
     files:
-      - AION_mux2i_1/AION_mux2i_1.v
-      - AION_mux2i_2/AION_mux2i_2.v
+      - AION_mux2i_1/AION_mux2i_1.v      
+      - AION_mux4i_1/AION_mux4i_1.v 
+      - AION_maj3i_1/AION_maj3i_1.v
     file_type: verilogSource
 
 targets:

@@ -43,15 +43,23 @@
 #  `survey` answers the other question -- why the mined cells are all two
 #  standard cells wide -- by histogramming the enumeration itself, before any
 #  filter, so the cost of each cap is a number rather than a guess.
+#
+#  Both mine against the technology dictionary step 2 does: the extended one
+#  when PDK_EXT is on (without it the loader silently drops every extension
+#  cell the netlist instantiates), with MINE_EXCLUDE's cells kept as leaves --
+#  both read from scripts/flow/config.py.  `--mine-exclude` overrides the
+#  exclusion, `--mine-exclude ''` mines everything, `--cell-lib` the base.
 # ================================================================
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import multiprocessing as mp
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -102,8 +110,11 @@ from aion_opt.report.reporter import (                          # noqa: E402
     write_pattern_report,
 )
 
+import merge_tech_dict                                          # noqa: E402
+from flow import paths                                          # noqa: E402
+from flow.config import Config                                  # noqa: E402
+
 DEFAULT_NETLIST = PROJECT_ROOT / "flow" / "1_synth" / "nl" / "tt_um_aion.nl.v"
-DEFAULT_CELL_LIB = PROJECT_ROOT / "aion_flow" / "tech" / "tech_dict" / "sg13g2_stdcell.json"
 DEFAULT_GATES = PROJECT_ROOT / "aion_flow" / "tech" / "spice" / "sg13g2_stdcell.spice"
 DEFAULT_WORK = PROJECT_ROOT / "flow" / "explore" / "work"
 
@@ -127,6 +138,40 @@ class Design:
     cell_lib_path: Path
     top: str | None
     total_area: float
+
+
+def mining_dictionary(cell_lib: Path | None, mine_exclude: str,
+                      work_dir: Path) -> Path:
+    """The technology dictionary step 2 would mine with, as a file.
+
+    `cell_lib` None picks step 2's base: the extended dictionary when PDK_EXT
+    is on and there are extension cells, the PDK's own otherwise.  With any
+    MINE_EXCLUDE pattern the result is a marked copy in `work_dir`, written by
+    the same function step 2 writes its copy with, so an `--emit` stays a
+    selection-cache hit in step 3.
+    """
+    base = cell_lib
+    if base is None:
+        base = paths.AION_OPT_TECH_DICT
+        if Config.PDK_EXT and paths.pdk_ext_cells():
+            base = paths.pdk_ext_dict()
+            if not base.exists():
+                raise SystemExit(
+                    f"error: PDK_EXT is on and there is no {base}\n"
+                    f"       run `make pdk_ext_lib` first, or pass --cell-lib")
+    patterns = merge_tech_dict.exclude_patterns(mine_exclude)
+    if not patterns:
+        print(f"[explore] tech dict {base} (no MINE_EXCLUDE)")
+        return base
+
+    out = work_dir / "tech_dict.json"
+    matched, unmatched = merge_tech_dict.write_excluded(base, patterns, out)
+    if unmatched:
+        print(f"[explore] WARNING: MINE_EXCLUDE {', '.join(unmatched)} matches "
+              f"no cell in {base}")
+    print(f"[explore] tech dict {base}, kept as leaves (MINE_EXCLUDE="
+          f"{mine_exclude}): {', '.join(matched) or '-'}")
+    return out
 
 
 def load_design(netlist: Path, cell_lib_path: Path, top: str | None,
@@ -221,9 +266,12 @@ def _survey_roots(roots: Sequence[int]) -> tuple[Counter, int]:
 def survey(design: Design, max_size: int, jobs: int | None,
            cache: Path | None) -> dict:
     """Histogram every subgraph of the design by size and boundary width."""
+    # Keyed on the dictionary too: a cell it keeps as a leaf is not in the
+    # graph, so a histogram mined with XOR is not one mined without.
+    cell_lib = hashlib.sha256(design.cell_lib_path.read_bytes()).hexdigest()
     if cache is not None and cache.exists():
         data = json.loads(cache.read_text())
-        if data.get("max_size") == max_size:
+        if data.get("max_size") == max_size and data.get("cell_lib") == cell_lib:
             print(f"[survey] reusing {cache}")
             return data
 
@@ -259,6 +307,7 @@ def survey(design: Design, max_size: int, jobs: int | None,
 
     data = {
         "max_size": max_size,
+        "cell_lib": cell_lib,
         "subgraphs": total,
         "seconds": round(time.time() - t0, 1),
         "histogram": {f"{s},{i},{o}": n for (s, i, o), n in sorted(hist.items())},
@@ -892,6 +941,8 @@ def rows_to_json(rows: list[Row], design: Design, args: argparse.Namespace,
     return {
         "design": {
             "netlist": str(design.netlist),
+            "cell_lib": str(design.cell_lib_path),
+            "mine_exclude": args.mine_exclude,
             "instances": len(design.circuit.instances),
             "standard_cell_area": design.total_area,
         },
@@ -943,14 +994,26 @@ def rows_to_json(rows: list[Row], design: Design, args: argparse.Namespace,
     }
 
 
-def recommend(row: Row) -> str:
+def recommend(row: Row, args: argparse.Namespace) -> str:
     return (f"./flow.py 2 --set MAX_SIZE={row.max_size} "
             f"--set MAX_OUTPUTS={row.max_outputs} "
             f"--set MAX_INPUTS={row.max_inputs} "
             f"--set MIN_OCCURRENCES={row.min_occurrences} "
             f"--set MIN_SELECTED={row.min_selected} "
             f"--set ELITE_COUNT={row.budget} "
-            f"--set ELITE_METRIC={row.metric}")
+            f"--set ELITE_METRIC={row.metric}"
+            f"{_mine_exclude_set(args)}")
+
+
+def _mine_exclude_set(args: argparse.Namespace) -> str:
+    """` --set MINE_EXCLUDE=...` when this run's differs from config.py's.
+
+    Quoted, because the shell would otherwise expand `*xor*` against the
+    current directory.
+    """
+    if args.mine_exclude == Config.MINE_EXCLUDE:
+        return ""
+    return f" --set {shlex.quote('MINE_EXCLUDE=' + args.mine_exclude)}"
 
 
 # ---------------------------------------------------------------------------
@@ -1052,7 +1115,10 @@ def emit(row: Row, mining: MiningResult, design: Design, outdir: Path,
           f"--set MAX_INPUTS={row.max_inputs} \\")
     print(f"      --set MIN_OCCURRENCES={row.min_occurrences} "
           f"--set MIN_SELECTED={row.min_selected} "
-          f"--set AREA_FACTOR={args.area_factor}")
+          f"--set AREA_FACTOR={args.area_factor}{_mine_exclude_set(args)}")
+    if args.cell_lib is not None:
+        print(f"[emit] note: mined against --cell-lib {args.cell_lib}; step 3 "
+              f"uses its own dictionary and re-mines unless the two match")
 
 
 def _flow_parameters(row: Row, args: argparse.Namespace) -> dict:
@@ -1101,7 +1167,14 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("survey", "sweep"):
         p = sub.add_parser(name)
         p.add_argument("--netlist", type=Path, default=DEFAULT_NETLIST)
-        p.add_argument("--cell-lib", type=Path, default=DEFAULT_CELL_LIB)
+        p.add_argument("--cell-lib", type=Path, default=None,
+                       help="technology dictionary to mine against (default: "
+                            "step 2's -- the extended one when PDK_EXT is on)")
+        p.add_argument("--mine-exclude", default=Config.MINE_EXCLUDE,
+                       metavar="GLOBS",
+                       help="comma-separated cell-name globs kept as leaves, "
+                            "never inside a pattern (default: MINE_EXCLUDE, "
+                            f"{Config.MINE_EXCLUDE!r}; '' mines everything)")
         p.add_argument("--top", default="tt_um_aion")
         p.add_argument("--work-dir", type=Path, default=DEFAULT_WORK)
         p.add_argument("--jobs", type=int, default=None,
@@ -1183,7 +1256,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "sweep" and args.minimizer_max_inputs <= 0:
         args.minimizer_max_inputs = 1 << 30
 
-    design = load_design(args.netlist, args.cell_lib, args.top,
+    cell_lib = mining_dictionary(args.cell_lib, args.mine_exclude, args.work_dir)
+    design = load_design(args.netlist, cell_lib, args.top,
                          args.work_dir, args.collapse_strengths)
 
     if args.command == "survey":
@@ -1221,7 +1295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the budgeted cover picks the cells first. No --set expresses that.
     print(f"\n  the {best.flow_saved:,.1f} um2 line, which is what the knobs "
           f"can reach:")
-    print(f"    {recommend(best)}")
+    print(f"    {recommend(best, args)}")
 
     if best.budget_saved > best.flow_saved * 1.005:
         gain = (best.budget_saved / best.flow_saved - 1) if best.flow_saved else 0.0

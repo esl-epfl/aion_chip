@@ -139,7 +139,7 @@ class RewriteStep(Step):
                 f"INPUT={step1}",
                 f"TOP={cfg.TOP}",
                 *mining_vars(cfg),
-                *cell_lib_vars(ctx),
+                *cell_lib_vars(ctx, self.outdir / "work"),
                 f"CELLS={self.cells}",
                 f"REWRITE_NETLIST={netlist}",
                 *(["REWRITE_FLAT=" + str(flat)] if cfg.REWRITE_FLAT else []),

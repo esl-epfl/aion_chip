@@ -140,6 +140,64 @@ def test_the_corners_default_to_all(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Publishing a cell that lost the comparison on delay
+# ---------------------------------------------------------------------------
+
+#: The tail of AION_maj3i_1's first post-layout run, verbatim.
+LOSS_RUN = """\
+  [1/7] build + DRC + LVS (candidate)
+  RESULT: PASS
+  [7/7] compare against the abutted baseline
+  COMPARE: LOSS area -36.4% (12.701 vs 19.958 um2)  worst delay +3.3% (520.0 vs 503.1 ps)
+COMPARE: LOSS area -36.4% (12.701 vs 19.958 um2) worst delay +3.3% (520.0 vs 503.1 ps)
+make[2]: *** [Makefile:206: flow] Error 1
+"""
+WIN_RUN = ("  RESULT: PASS\nCOMPARE: WIN  area -46.2% (12.701 vs 23.587 um2)  "
+           "worst delay -24.6% (324.4 vs 430.4 ps)\n")
+
+
+def test_the_comparison_is_read_from_its_column_zero_line():
+    assert pdk_cell.read_comparison(LOSS_RUN) == pdk_cell.Comparison("LOSS", -36.4, 3.3)
+    assert pdk_cell.read_comparison(WIN_RUN) == pdk_cell.Comparison("WIN", -46.2, -24.6)
+    assert pdk_cell.read_comparison("  [4/7] characterize (candidate)\n") is None
+
+
+@pytest.mark.parametrize("output, accept, allowed, accepted", [
+    (WIN_RUN, None, True, False),
+    (LOSS_RUN, None, False, False),                 # the default stays strict
+    (LOSS_RUN, 5, True, True),
+    (LOSS_RUN, 3.3, True, True),                    # the printed value, inclusive
+    (LOSS_RUN, 2, False, False),                    # slower than accepted
+    (LOSS_RUN.replace("area -36.4%", "area +4.0%"), 50, False, False),   # not smaller
+    (LOSS_RUN.replace("RESULT: PASS", "RESULT: FAIL"), 5, False, False),  # re-graded
+    ("  [4/7] characterize (candidate)\nTraceback ...\n", 5, False, False),  # never compared
+])
+def test_a_loss_is_published_only_when_accepted_and_smaller(output, accept, allowed, accepted):
+    got_allowed, got_accepted, reason = pdk_cell.may_publish(output, accept)
+    assert (got_allowed, got_accepted) == (allowed, accepted), reason
+
+
+def test_publish_only_reuses_the_last_run_without_running_it(cell, monkeypatch, capsys):
+    """`--only publish` needs no container and runs no make target."""
+    _export(cell, *CORNER_LIBS)
+    log = pdk_cell.Runner().log_dir / f"{CELL}.flow.log"   # where post-layout wrote it
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(LOSS_RUN)
+    monkeypatch.setattr(pdk_cell.Runner, "_exec",
+                        lambda *a, **k: pytest.fail("publish must not run anything"))
+    monkeypatch.setattr(pdk_cell, "container_running",
+                        lambda: pytest.fail("publish must not need the container"))
+
+    assert pdk_cell.main([CELL, "--only", "publish"]) == 1
+    assert not any(cell.dir.glob(f"{CELL}_*.lib")), "a refused LOSS publishes nothing"
+    assert "--accept-delay-loss" in capsys.readouterr().out
+
+    assert pdk_cell.main([CELL, "--only", "publish", "--accept-delay-loss", "5"]) == 0
+    assert sorted(p.name for p in cell.dir.glob(f"{CELL}_*.lib")) == sorted(CORNER_LIBS)
+    assert "LOSS ACCEPTED" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # The drawing agent's prompt
 # ---------------------------------------------------------------------------
 
@@ -195,3 +253,77 @@ def test_verdict_text_reads_the_report_when_verify_wrote_one(tmp_path):
     report.write_text("  1. abstract (LEF): PIN I0 can put a Via2 on 1 Metal3 track\nRESULT: FAIL\n")
 
     assert "PIN I0 can put a Via2" in agent.verdict_text(report, "ignored output")
+
+
+# ---------------------------------------------------------------------------
+# Mining: an extension cell is a leaf
+# ---------------------------------------------------------------------------
+
+def test_the_miner_dictionary_marks_every_extension_cell_a_leaf():
+    """Only the cells merge_lib.py spliced in; the PDK's own entries are untouched.
+
+    With PDK_EXT on, step 2 mined AION_mux2i_0 (two AION_mux2i_1) and
+    AION_mux2i_sg13g2_mux2_6, and step 4 could not characterize either. Kept a
+    leaf, the mux is never folded into a pattern at all.
+    """
+    import merge_tech_dict
+
+    base = {"cells": {"sg13g2_mux2_1": {"area": 20.0, "pins": {"A0": "input", "X": "output"},
+                                        "function": "A0"}}}
+    lib_text = (
+        "library (x) {\n"
+        "  cell (sg13g2_mux2_1) { area : 20.0; pin (X) { direction : output; function : \"A0\"; } }\n"
+        "  cell (AION_mux2i_1) { area : 12.7; pin (I0) { direction : input; }\n"
+        "    pin (O0) { direction : output; function : \"!I0\"; } }\n"
+        "}\n")
+    merged, added = merge_tech_dict.merge(base, lib_text)
+
+    assert added == ["AION_mux2i_1"]
+    assert merged["cells"]["AION_mux2i_1"]["mineable"] is False
+    assert "mineable" not in merged["cells"]["sg13g2_mux2_1"], "PDK cells stay mineable"
+    assert "mineable" not in base["cells"]["sg13g2_mux2_1"], "the base dictionary is not mutated"
+
+
+def test_mine_exclude_marks_every_strength_of_a_matching_pdk_cell_a_leaf():
+    """MINE_EXCLUDE's default keeps XOR and XNOR out of every mined pattern.
+
+    Both drive strengths, because aion_opt folds them onto one key and reads
+    whichever is smallest; and nothing else, `*xor*` notwithstanding.
+    """
+    import merge_tech_dict
+
+    base = {"cells": {name: {"area": 1.0} for name in (
+        "sg13g2_xor2_1", "sg13g2_xor2_2", "sg13g2_xnor2_1", "sg13g2_nor2_1")}}
+    marked, matched = merge_tech_dict.exclude(base, ["*xor*", "*xnor*"])
+
+    assert matched == ["sg13g2_xnor2_1", "sg13g2_xor2_1", "sg13g2_xor2_2"]
+    assert all(marked["cells"][name]["mineable"] is False for name in matched)
+    assert "mineable" not in marked["cells"]["sg13g2_nor2_1"]
+    assert "mineable" not in base["cells"]["sg13g2_xor2_1"], "the base dictionary is not mutated"
+
+
+def test_step2_and_the_sweep_write_the_same_bytes_and_name_a_typo(tmp_path):
+    """aion_opt fingerprints a selection by the dictionary's content.
+
+    scripts/explore_cells.py and step 2 each write their own copy; an
+    `--emit` from the sweep is only a cache hit in step 3 if the copies are
+    byte-equal. A glob that matches nothing is reported, not ignored.
+    """
+    import json
+
+    import merge_tech_dict
+
+    source = tmp_path / "base.json"
+    source.write_text(json.dumps({"cells": {"sg13g2_xor2_1": {"area": 1.0},
+                                            "sg13g2_nor2_1": {"area": 1.0}}}))
+    patterns = merge_tech_dict.exclude_patterns(" *xor* , *xnro*,")
+    assert patterns == ["*xor*", "*xnro*"]
+    assert merge_tech_dict.exclude_patterns("") == []
+
+    first, second = tmp_path / "s2" / "tech_dict.json", tmp_path / "sweep" / "tech_dict.json"
+    matched, unmatched = merge_tech_dict.write_excluded(source, patterns, first)
+    merge_tech_dict.write_excluded(source, patterns, second)
+
+    assert matched == ["sg13g2_xor2_1"]
+    assert unmatched == ["*xnro*"]
+    assert first.read_bytes() == second.read_bytes()

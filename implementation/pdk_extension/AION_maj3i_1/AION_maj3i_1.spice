@@ -1,0 +1,48 @@
+* ================================================================
+*  SPDX-FileCopyrightText:    2026 Filippo Quadri
+*  SPDX-License-Identifier:   Apache-2.0 WITH SHL-2.1
+*  Description:               AION_maj3i_1 -- inverting 3-input majority
+*
+*  FIRST DRAFT.  Not yet through `pdk_cell.py --only characterize`.
+*
+*  The mirror adder's carry stage: one complementary CMOS stage of 10
+*  devices, against the 14 of the abutted sg13g2_or2_1 + sg13g2_a22oi_1
+*  baseline.
+*
+*      O0 = !((I0 * I1) + (I0 * I2) + (I1 * I2))
+*
+*  No transmission gates here.  This is plain static CMOS the PDK happens
+*  not to ship.  Majority is self-dual, maj(!a,!b,!c) = !maj(a,b,c), so the
+*  pull-up can use the pull-down's own topology instead of its series/
+*  parallel dual:
+*
+*      pull-down   (I0 | I1) -- I2      in parallel with   I0 -- I1
+*      pull-up     the same graph, pmos
+*
+*  Both networks are 5 devices and at most 2 deep.  Both also have the same
+*  Euler path, gate order I2 I1 I0 I0 I1, so each row can be one unbroken
+*  diffusion strip.  That is where the 7-site estimate comes from:
+*  sg13g2_a22oi_1 is 8 devices on two unbroken strips in 6 sites.
+*
+*  Devices are single fingers at sg13g2_a22oi_1's widths for its 2-deep
+*  stacks (nmos 740 nm, pmos 1120 nm).  ad/as/pd/ps are those of
+*  sg13g2_inv_1.
+*
+*  I0 and I1 each drive four gates; I2 drives two.
+*
+*      scripts/pdk_cell.py AION_maj3i_1 --driver-cell sg13g2_buf_2
+* ================================================================
+.subckt AION_maj3i_1 I0 I1 I2 O0 VDD VSS
+* ---- pull-down: O0 -(I0|I1)- n1 -I2- VSS,  O0 -I0- n2 -I1- VSS ---------
+XN0 O0 I0 n1  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XN1 O0 I1 n1  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XN2 n1 I2 VSS VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XN3 O0 I0 n2  VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+XN4 n2 I1 VSS VSS sg13_lv_nmos w=740.00n l=130.00n ng=1 m=1 ad=2.516e-13 as=2.516e-13 pd=2.16e-06 ps=2.16e-06
+* ---- pull-up: the same graph -------------------------------------------
+XP0 O0 I0 p1  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XP1 O0 I1 p1  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XP2 p1 I2 VDD VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XP3 O0 I0 p2  VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+XP4 p2 I1 VDD VDD sg13_lv_pmos w=1.12u   l=130.00n ng=1 m=1 ad=3.808e-13 as=3.808e-13 pd=2.92e-06 ps=2.92e-06
+.ends
