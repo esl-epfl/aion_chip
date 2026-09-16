@@ -45,7 +45,7 @@ class Config:
     # 1_synth
     # =====================================================================
     # verilator | icarus
-    SYNTH_SIM_TOOL: str = "verilator"
+    SYNTH_SIM_TOOL: str = "icarus"
 
     # Map against the extended standard-cell Liberty -- the PDK's cells plus
     # the hand-designed ones under implementation/pdk_extension/ -- so the
@@ -78,13 +78,13 @@ class Config:
     MAX_SIZE: int = 2
     MIN_OCCURRENCES: int = 2
     MIN_SELECTED: int | None = 1
-    AREA_FACTOR: float = 0.85
-    MAX_OUTPUTS: int | None = 2
-    MAX_INPUTS: int | None = 4
+    AREA_FACTOR: float = 0.9
+    MAX_OUTPUTS: int | None = 1
+    MAX_INPUTS: int | None = 6
     JOBS: int | None = None
     CELL_PREFIX: str = "AION_"
-    ELITE_COUNT: int | None = 15
-    ELITE_METRIC: str = "saved-area"
+    ELITE_COUNT: int | None = 25
+    ELITE_METRIC: str = "occurrences"
     MINE_EXCLUDE: str = "*xor*,*xnor*,*mux*"
 
     # =====================================================================

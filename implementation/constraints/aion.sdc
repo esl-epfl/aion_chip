@@ -20,7 +20,7 @@ proc aion_env {name default} {
 }
 
 set clk_port     [lindex [aion_env CLOCK_PORT clk] 0]
-set clk_period   [aion_env CLOCK_PERIOD 20.0]
+set clk_period   [aion_env CLOCK_PERIOD 40.0]
 set io_pct       [aion_env IO_DELAY_CONSTRAINT 20]
 set io_min_pct   [aion_env IO_MIN_DELAY_CONSTRAINT 0]
 set uncertainty  [aion_env CLOCK_UNCERTAINTY_CONSTRAINT 0.25]

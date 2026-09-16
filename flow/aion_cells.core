@@ -11,7 +11,7 @@ CAPI=2:
 name: epfl:aion:flow_cells:1.0.0
 description: |
   Verilog models of the AION cells flow step 6 drew and published.
-  Currently: 15 drawn cell(s): AION_a21o_nand2_9, AION_a21oi_nor2_1, AION_a21oi_nor2_3, AION_a21oi_nor2_6, AION_and2_o21ai_5, AION_and2_o21ai_7, AION_and3_or2_14, AION_nand2_nor2_2, AION_nand2_o21ai_0, AION_nand2_o21ai_10, AION_nand2_o21ai_11, AION_nand2_o21ai_12, AION_nand2_o21ai_8, AION_nor2_o21ai_13, AION_nor2_o21ai_4.
+  Currently: 25 drawn cell(s): AION_a21o_and2_11, AION_a21o_nand3_12, AION_a21o_nor2b_13, AION_a21oi_inv_23, AION_a21oi_nand3b_3, AION_a21oi_nor2_1, AION_a21oi_nor2_22, AION_a21oi_nor4_14, AION_a21oi_o21ai_8, AION_a21oi_or2_9, AION_a22oi_nor2_2, AION_inv_nand2_31, AION_nand2_32, AION_nand2_o21ai_0, AION_nand2_o21ai_12, AION_nand2b_nand3_19, AION_nand2b_o21ai_16, AION_nand2b_o21ai_6, AION_nand3_nor2b_18, AION_nand3_o21ai_17, AION_nor2_33, AION_nor2_o21ai_5, AION_nor2b_o21ai_10, AION_nor3_o21ai_7, AION_o21ai_5.
 
   The post-PnR netlist instantiates the AION cells as LEAF cells -- LibreLane
   hardens them as macros and the SDF carries one CELL entry per instance -- so
@@ -22,21 +22,31 @@ description: |
 filesets:
   models:
     files:
-      - 6_layout_drawing/AION_a21o_nand2_9/final/AION_a21o_nand2_9.v
+      - 6_layout_drawing/AION_a21o_and2_11/final/AION_a21o_and2_11.v
+      - 6_layout_drawing/AION_a21o_nand3_12/final/AION_a21o_nand3_12.v
+      - 6_layout_drawing/AION_a21o_nor2b_13/final/AION_a21o_nor2b_13.v
+      - 6_layout_drawing/AION_a21oi_inv_23/final/AION_a21oi_inv_23.v
+      - 6_layout_drawing/AION_a21oi_nand3b_3/final/AION_a21oi_nand3b_3.v
       - 6_layout_drawing/AION_a21oi_nor2_1/final/AION_a21oi_nor2_1.v
-      - 6_layout_drawing/AION_a21oi_nor2_3/final/AION_a21oi_nor2_3.v
-      - 6_layout_drawing/AION_a21oi_nor2_6/final/AION_a21oi_nor2_6.v
-      - 6_layout_drawing/AION_and2_o21ai_5/final/AION_and2_o21ai_5.v
-      - 6_layout_drawing/AION_and2_o21ai_7/final/AION_and2_o21ai_7.v
-      - 6_layout_drawing/AION_and3_or2_14/final/AION_and3_or2_14.v
-      - 6_layout_drawing/AION_nand2_nor2_2/final/AION_nand2_nor2_2.v
+      - 6_layout_drawing/AION_a21oi_nor2_22/final/AION_a21oi_nor2_22.v
+      - 6_layout_drawing/AION_a21oi_nor4_14/final/AION_a21oi_nor4_14.v
+      - 6_layout_drawing/AION_a21oi_o21ai_8/final/AION_a21oi_o21ai_8.v
+      - 6_layout_drawing/AION_a21oi_or2_9/final/AION_a21oi_or2_9.v
+      - 6_layout_drawing/AION_a22oi_nor2_2/final/AION_a22oi_nor2_2.v
+      - 6_layout_drawing/AION_inv_nand2_31/final/AION_inv_nand2_31.v
+      - 6_layout_drawing/AION_nand2_32/final/AION_nand2_32.v
       - 6_layout_drawing/AION_nand2_o21ai_0/final/AION_nand2_o21ai_0.v
-      - 6_layout_drawing/AION_nand2_o21ai_10/final/AION_nand2_o21ai_10.v
-      - 6_layout_drawing/AION_nand2_o21ai_11/final/AION_nand2_o21ai_11.v
       - 6_layout_drawing/AION_nand2_o21ai_12/final/AION_nand2_o21ai_12.v
-      - 6_layout_drawing/AION_nand2_o21ai_8/final/AION_nand2_o21ai_8.v
-      - 6_layout_drawing/AION_nor2_o21ai_13/final/AION_nor2_o21ai_13.v
-      - 6_layout_drawing/AION_nor2_o21ai_4/final/AION_nor2_o21ai_4.v
+      - 6_layout_drawing/AION_nand2b_nand3_19/final/AION_nand2b_nand3_19.v
+      - 6_layout_drawing/AION_nand2b_o21ai_16/final/AION_nand2b_o21ai_16.v
+      - 6_layout_drawing/AION_nand2b_o21ai_6/final/AION_nand2b_o21ai_6.v
+      - 6_layout_drawing/AION_nand3_nor2b_18/final/AION_nand3_nor2b_18.v
+      - 6_layout_drawing/AION_nand3_o21ai_17/final/AION_nand3_o21ai_17.v
+      - 6_layout_drawing/AION_nor2_33/final/AION_nor2_33.v
+      - 6_layout_drawing/AION_nor2_o21ai_5/final/AION_nor2_o21ai_5.v
+      - 6_layout_drawing/AION_nor2b_o21ai_10/final/AION_nor2b_o21ai_10.v
+      - 6_layout_drawing/AION_nor3_o21ai_7/final/AION_nor3_o21ai_7.v
+      - 6_layout_drawing/AION_o21ai_5/final/AION_o21ai_5.v
     file_type: verilogSource
 
 targets:
